@@ -9,21 +9,85 @@
 <body>
   <main class="card prose">
     <h1>Waitlist privacy notice</h1>
-    <p class="small">TEMPLATE — the owner (and a lawyer, if needed) must complete and check every line. Version: waitlist-v1.</p>
-    <h2>Who we are</h2>
-    <p>[Company name, address, contact email]. We are the controller of the data below.</p>
-    <h2>What we collect and why</h2>
-    <p>Only your email address, the language of the page, and the date and wording of the consent you gave. We use it only to email you about the launch of Brand AI. Legal basis: your consent (GDPR Art. 6(1)(a)).</p>
-    <h2>What we do NOT collect</h2>
-    <p>No name, no phone number, no IP address stored, no advertising trackers, no analytics cookies on this page.</p>
-    <h2>Who processes it for us</h2>
-    <p>[Database host, region] and [email provider, region], under data processing agreements.</p>
-    <h2>How long</h2>
-    <p>If you never confirm, your address is deleted after 30 days. After you unsubscribe it is deleted after 12 months. (Example numbers — set by the owner.)</p>
-    <h2>Your rights</h2>
-    <p>Unsubscribe with one click in any email. To see or delete your data, write to [privacy email]. If you ask us to delete it, we keep only a one-way keyed fingerprint of the address so that we never email you again.</p>
-    <h2>Age</h2>
-    <p>The waitlist is for people aged 16 or older.</p>
+    <p class="small">TEMPLATE — the owner must fill in every [bracket] and have the final text checked
+      (a lawyer is recommended). Version: waitlist-v1. Last updated: [date].</p>
+
+    <h2>1. Who we are</h2>
+    <p>[Company or full name], [address], [KvK number if registered], the Netherlands.
+      We are the controller of the personal data described here.
+      Contact for privacy questions: [privacy email address].</p>
+
+    <h2>2. What we collect</h2>
+    <ul>
+      <li>Your email address.</li>
+      <li>The language of your browser (for example "en" or "nl"), so we can write to you in the right language.</li>
+      <li>An optional campaign code from the link you used (for example "instagram"), never anything that identifies you.</li>
+      <li>Proof of your consent: which version of this text you agreed to, and when you signed up, confirmed or unsubscribed.</li>
+    </ul>
+    <p>We do <strong>not</strong> collect your name or phone number, we do not store your IP address in our
+      database, and this page uses no advertising trackers and no analytics cookies.</p>
+
+    <h2>3. Why, and on what legal basis</h2>
+    <ul>
+      <li><strong>Launch emails</strong> (a few emails at most about the launch of Brand AI): your consent
+        (GDPR Art. 6(1)(a)). You give it by ticking the box and pressing the button in our confirmation email.</li>
+      <li><strong>Keeping proof of consent</strong> and a <strong>do-not-email list</strong> after you unsubscribe,
+        bounce or ask for deletion: our legal obligation to be able to prove consent and our legitimate interest in
+        never emailing you again (Art. 6(1)(c) and (f)).</li>
+      <li><strong>Protecting the form against bots and abuse</strong> (see Cloudflare Turnstile below): our legitimate
+        interest in keeping the service secure and stopping our form from being used to flood other people's inboxes
+        (Art. 6(1)(f)).</li>
+    </ul>
+    <p>Joining the waitlist is voluntary. If you do not give consent, we do not store your email.</p>
+
+    <h2>4. Who processes data for us</h2>
+    <p>We use these service providers, each under a data processing agreement:</p>
+    <ul>
+      <li><strong>Supabase</strong> (database and server functions), region: [EU region, for example Frankfurt].</li>
+      <li><strong>[Email provider, for example Resend]</strong> (sends the confirmation and launch emails), region: [region].</li>
+      <li><strong>Cloudflare Turnstile</strong> (bot check on the form). To tell people from bots, Cloudflare
+        processes technical data from your browser, including your <strong>IP address</strong>. We never receive or
+        store that data. See Cloudflare's privacy policy: https://www.cloudflare.com/privacypolicy/</li>
+      <li><strong>[Hosting provider of this website]</strong>, which, like every web server, briefly processes your
+        IP address to deliver the page.</li>
+    </ul>
+    <p>Some of these companies are based in the United States. Where data leaves the EU, it is protected by the
+      EU-US Data Privacy Framework and/or the European Commission's Standard Contractual Clauses. [Owner: check this
+      for each provider.]</p>
+
+    <h2>5. How long we keep it</h2>
+    <ul>
+      <li>Never confirmed: deleted automatically 30 days after our last confirmation email.</li>
+      <li>Confirmed: kept until we have sent the launch emails, then [deleted / kept only with your consent].</li>
+      <li>Unsubscribed: deleted 12 months after you unsubscribe.</li>
+      <li>After deletion we keep only a one-way keyed fingerprint (a hash) of your address on a do-not-email list, so
+        we can keep the promise never to email you again. It cannot be turned back into your address.</li>
+    </ul>
+    <p class="small">The numbers above are examples set by the owner; they must match the real settings.</p>
+
+    <h2>6. Your rights</h2>
+    <ul>
+      <li><strong>Withdraw your consent</strong> at any time with the unsubscribe link in every email. This does not
+        affect emails sent before you withdrew.</li>
+      <li>Ask to <strong>see</strong>, <strong>correct</strong> or <strong>delete</strong> your data, to
+        <strong>restrict</strong> its use, to receive a <strong>copy</strong> of it, or to <strong>object</strong> to
+        processing based on our legitimate interest. Write to [privacy email address]. We answer within one month.</li>
+      <li><strong>Complain</strong> to the Dutch data protection authority, the Autoriteit Persoonsgegevens:
+        https://autoriteitpersoonsgegevens.nl</li>
+    </ul>
+    <p>We do not sell your data, and we make no automated decisions about you.</p>
+
+    <h2>7. Age</h2>
+    <p>The waitlist is only for people aged 16 or older.</p>
+
+    <h2>8. Security</h2>
+    <p>Your address is stored in a locked database that the website itself cannot read, every link we send is
+      single-use or signed, and only the people who run Brand AI can access the list.</p>
+
+    <h2>9. Changes</h2>
+    <p>If we change what we do with your data, we update this notice and its version number, and we ask for new
+      consent where the law requires it.</p>
+
     <p><a href="/">Back</a></p>
   </main>
 </body>
