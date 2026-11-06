@@ -1,10 +1,11 @@
 // TEST-ONLY: drives a real Chrome through signup -> email -> confirm -> unsubscribe.
 import { chromium } from "playwright";
 const SITE = "http://localhost:8787", API = "http://localhost:8788";
+const CHROME = process.env.CHROME_PATH ?? "/usr/bin/google-chrome";
 const ok = (c, m) => { if (!c) { console.log("FAIL: " + m); process.exit(1); } console.log("ok   " + m); };
 const psql = async (sql) => (await import("node:child_process")).execSync(`psql -h /tmp -p 5433 -U postgres -d ${process.env.DB ?? "waitlist_test"} -qAt -c "${sql}"`).toString().trim();
 
-const browser = await chromium.launch({ executablePath: "/usr/bin/google-chrome", args: ["--no-sandbox"] });
+const browser = await chromium.launch({ executablePath: CHROME });   // Chrome sandbox stays ON
 const page = await browser.newPage();
 const cspErrors = [];
 page.on("console", (m) => { if (/Content Security Policy|Refused to/i.test(m.text())) cspErrors.push(m.text()); });

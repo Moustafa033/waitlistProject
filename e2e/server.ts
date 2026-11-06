@@ -47,7 +47,11 @@ const cfg: Config = {
   resendApiKey: "re_e2e", mailFrom: "Brand AI <hello@mail.example.com>", consentVersion: "waitlist-v1", minFillMs: 2500,
 };
 const api = makeHandler({ cfg, fetchFn: fakeFetch, background: (p) => { p.catch(() => {}); } });
-Deno.serve({ port: API, onListen: () => {} }, (req) => {
+// Bind to loopback ONLY. Deno.serve defaults to 0.0.0.0 (every network interface), which
+// would expose /__mail (real confirmation tokens) to anyone on the same Wi-Fi — the same
+// mistake as the Metro dev-server RCE (gym guide SC-10).
+const HOST = "localhost";   // resolves to loopback only; matches the localhost origin the test uses
+Deno.serve({ hostname: HOST, port: API, onListen: () => {} }, (req) => {
   if (new URL(req.url).pathname === "/__mail") return Response.json(mails);   // test only
   return api(req);
 });
@@ -63,7 +67,7 @@ for (const line of headersFile.split("\n")) {
   if (inGlobal && m) global.push([m[1], m[2].replace("https://YOUR-PROJECT-REF.supabase.co", `http://localhost:${API}`).replace("; upgrade-insecure-requests", "")]);
 }
 const types: Record<string, string> = { html: "text/html; charset=utf-8", js: "text/javascript", css: "text/css", txt: "text/plain" };
-Deno.serve({ port: SITE, onListen: () => console.log("e2e ready") }, async (req) => {
+Deno.serve({ hostname: HOST, port: SITE, onListen: () => console.log("e2e ready") }, async (req) => {
   let p = new URL(req.url).pathname;
   if (p === "/") p = "/index.html";
   else if (!p.includes(".")) p += ".html";
