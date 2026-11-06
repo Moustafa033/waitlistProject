@@ -55,9 +55,27 @@ set role service_role;
 select t.ok(public.waitlist_public_count() % 10 = 0, 'public counter is rounded to 10s');
 reset role;
 
--- retention
-update private.signups set created_at = now() - interval '31 days' where email = 'loc@example.com';
+-- retention (window counts from the LAST confirmation email; loc got its email at signup)
+update private.signups set created_at = now() - interval '31 days', last_confirm_sent_at = now() - interval '31 days'
+ where email = 'loc@example.com';
+
+-- returning person: joined 400 days ago, unsubscribed, re-joins today => must survive tonight's cleanup
 set role service_role;
+insert into r values ('back1', public.waitlist_signup('back@example.com', 'waitlist-v1'));
+select public.waitlist_unsubscribe((select (v->>'signup_id')::uuid from r where k='back1'),
+                                   public.waitlist_unsub_token((select (v->>'signup_id')::uuid from r where k='back1')));
+reset role;
+update private.signups set created_at = now() - interval '400 days', unsubscribed_at = now() - interval '200 days',
+       last_confirm_sent_at = now() - interval '400 days' where email = 'back@example.com';
+set role service_role;
+insert into r values ('back2', public.waitlist_signup('back@example.com', 'waitlist-v1'));
+select t.ok((select v->>'action' from r where k='back2') = 'send', 'returning person gets a new confirmation email');
+
 select t.ok((public.waitlist_maintenance()->>'pending_deleted')::int >= 1, 'maintenance deletes never-confirmed rows after the retention window');
 reset role;
 select t.ok(not exists (select 1 from private.signups where email='loc@example.com'), 'old pending row is gone');
+select t.ok(exists (select 1 from private.signups where email='back@example.com' and status='pending'),
+  'returning person''s fresh pending row survives the cleanup (old created_at is not used)');
+set role service_role;
+select t.ok((public.waitlist_confirm((select v->>'token' from r where k='back2'))->>'ok')::boolean, 'returning person can still confirm after the cleanup');
+reset role;

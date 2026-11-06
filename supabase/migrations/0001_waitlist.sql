@@ -171,6 +171,17 @@ create table private.counters (
   primary key (bucket, period)
 );
 
+-- FORCE RLS with no policies also applies to the table OWNER unless the owner role is a
+-- superuser or has BYPASSRLS. The SECURITY DEFINER RPCs run as the owner, so if the owner
+-- lacked BYPASSRLS every RPC would silently see 0 rows and every signup would fail.
+-- Refuse to install in that case instead of failing quietly in production.
+-- (The local tests run as a superuser, so only this check proves it on real Supabase.)
+do $$ begin
+  if not exists (select 1 from pg_roles where rolname = current_user and (rolsuper or rolbypassrls)) then
+    raise exception 'waitlist migration: role % must have BYPASSRLS (or be superuser) to own the private tables', current_user;
+  end if;
+end $$;
+
 -- RLS on (and forced) everywhere, no policies => nobody but table owner / bypassrls
 do $$ declare r record; begin
   for r in select tablename from pg_tables where schemaname = 'private' loop
@@ -391,8 +402,12 @@ create or replace function public.waitlist_maintenance() returns jsonb
 language plpgsql security definer set search_path = '' as $$
 declare a integer; b integer; c integer;
 begin
+  -- Counted from the LAST confirmation email, not from created_at: a person who unsubscribed
+  -- long ago and re-joins today gets a fresh pending row with an old created_at; using
+  -- created_at would delete it (and kill their new link) the same night.
   delete from private.signups
-   where status = 'pending' and created_at < now() - make_interval(days => private.cfg_int('pending_retention_days'));
+   where status = 'pending'
+     and coalesce(last_confirm_sent_at, created_at) < now() - make_interval(days => private.cfg_int('pending_retention_days'));
   get diagnostics a = row_count;
   delete from private.signups
    where status = 'unsubscribed' and coalesce(unsubscribed_at, updated_at) < now() - make_interval(days => private.cfg_int('unsub_retention_days'));

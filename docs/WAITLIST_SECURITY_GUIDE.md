@@ -156,6 +156,11 @@ practice the global caps in the DB are the real protection.
 Even `service_role` has **no direct table access**: everything goes through the RPCs, so every rule
 always runs. Tested.
 
+Because RLS is **forced** with no policies, the RPCs (SECURITY DEFINER, run as the table owner) only
+work if the owner role has `BYPASSRLS` or is a superuser. The migration checks this and refuses to
+install otherwise. The local tests run as a superuser, so this check is the only proof on real
+Supabase — run the migration on a **staging** project first.
+
 ### 4.2 Email validation (same rule in TypeScript and SQL)
 Conservative ASCII only: local part 1–64 of `a-z0-9.!#$%&'*+/=?^_\`{|}~-`, no leading/trailing/double
 dot, domain labels `a-z0-9-` (no leading/trailing hyphen), letters-only TLD, total ≤ 254. Any control
@@ -178,7 +183,9 @@ also resets that address's counter, so the true ceiling is 3 emails per 30 days 
 for data minimization.
 
 ### 4.4 Lifecycle and retention (examples)
-- pending, never confirmed → deleted after 30 days (`waitlist_maintenance`, daily via pg_cron).
+- pending, never confirmed → deleted 30 days after the **last confirmation email** (not after
+  `created_at`: a returning person re-joining an old row must not lose their fresh link that night)
+  (`waitlist_maintenance`, daily via pg_cron).
 - unsubscribed → deleted after 365 days.
 - confirmed → kept until launch use ends; then the owner decides (delete or keep with the same consent).
 - erasure request → `waitlist_erase(email)`: row deleted, consent events unlinked, a keyed hash kept in
