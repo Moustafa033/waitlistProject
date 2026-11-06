@@ -74,10 +74,18 @@ Deno.test("email: P-2 identity is lower+trim only; dots and plus are different p
   eq(normalizeEmail("a.hmed+gym@example.com"), "a.hmed+gym@example.com");
 });
 Deno.test("email: hostile inputs are refused, never cleaned", () => {
-  for (const bad of ["victim@example.com\r\nBcc: x@y.com", "a​@example.com", "a@exаmple.com" /* cyrillic а */,
+  for (const bad of ["victim@example.com\r\nBcc: x@y.com", "a\u200B@example.com", "a@ex\u0430mple.com" /* cyrillic \u0430 */,
     "a@b", "a@@b.com", ".a@b.com", "a.@b.com", "a..b@c.com", "\"a b\"@c.com", "=cmd|' /C calc'!A0@x.com",
     "a@-b.com", "a@b-.com", "a@b.c0m", "x".repeat(65) + "@a.com", 42, null]) {
     throwsCode(() => normalizeEmail(bad), "invalid_email");
+  }
+});
+Deno.test("email: every invisible/bidi/control character is refused (built from code points, none raw in this file)", () => {
+  const codes = [0x00, 0x09, 0x0a, 0x0d, 0x7f, 0x85, 0xad, 0x61c, 0x180e, 0x200b, 0x200c, 0x200d, 0x200e, 0x200f,
+    0x202a, 0x202b, 0x202c, 0x202d, 0x202e, 0x2060, 0x2061, 0x2062, 0x2063, 0x2064, 0x2066, 0x2067, 0x2068, 0x2069, 0xfeff];
+  for (const c of codes) {
+    const ch = String.fromCharCode(c);
+    for (const s of [`a${ch}b@example.com`, `ab@exa${ch}mple.com`, `${ch}ab@example.com`]) throwsCode(() => normalizeEmail(s), "invalid_email");
   }
 });
 Deno.test("disposable domains match subdomains too", () => {
@@ -100,7 +108,10 @@ Deno.test("config refuses legacy JWT keys and wildcard/insecure origins", () => 
     TURNSTILE_SECRET: "s", TURNSTILE_HOSTNAMES: "waitlist.example.com", RESEND_API_KEY: "re_x", MAIL_FROM: "a <a@b.com>", CONSENT_VERSION: "v1",
     SUPABASE_SECRET_KEYS: JSON.stringify({ default: "sb_secret_abc" }) };
   eq(loadConfig((n) => base[n]).secretKey, "sb_secret_abc");
-  for (const [k, v] of [["SUPABASE_SECRET_KEYS", JSON.stringify({ default: "eyJhbGciOi..." })], ["SITE_ORIGIN", "*"], ["SITE_ORIGIN", "http://evil.com"], ["RESEND_API_KEY", "sk_live"]]) {
+  eq(loadConfig((n) => base[n]).minFillMs, 2500, "default time trap");
+  eq(loadConfig((n) => (n === "MIN_FILL_MS" ? "3000" : base[n])).minFillMs, 3000);
+  for (const [k, v] of [["SUPABASE_SECRET_KEYS", JSON.stringify({ default: "eyJhbGciOi..." })], ["SITE_ORIGIN", "*"], ["SITE_ORIGIN", "http://evil.com"], ["RESEND_API_KEY", "sk_live"],
+                        ["MIN_FILL_MS", "abc"], ["MIN_FILL_MS", "2.5s"], ["MIN_FILL_MS", "0"], ["MIN_FILL_MS", "-1"], ["MIN_FILL_MS", "999999"], ["MIN_FILL_MS", ""]]) {
     let threw = false;
     try { loadConfig((n) => (n === k ? v : base[n])); } catch (e) { threw = e instanceof ConfigError; }
     assert(threw, `${k}=${v} must be refused`);
@@ -181,6 +192,7 @@ Deno.test("mail provider unreachable -> global send unit refunded, visitor sees 
 });
 
 Deno.test("internal errors never leak details", async () => {
+  // deno-lint-ignore require-await -- a fetch that always rejects (simulated outage)
   const broken = (async () => { throw new Error("db password=hunter2 at host x"); }) as unknown as typeof fetch;
   const r = await makeHandler(deps(broken))(req("signup", goodBody()));
   eq(r.status, 503); // Turnstile is first and fails closed

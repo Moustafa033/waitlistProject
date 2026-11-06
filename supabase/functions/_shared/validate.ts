@@ -4,6 +4,12 @@
 import { HttpError } from "./http.ts";
 
 const LOCAL = /^[a-z0-9.!#$%&'*+/=?^_`{|}~-]{1,64}$/;
+// Refused characters, written as \u escapes (never as raw invisible characters, which a
+// reviewer cannot see — "Trojan Source"): C0/C1 controls, soft hyphen, Arabic letter mark,
+// Mongolian vowel separator, zero-width + bidi marks, bidi embeddings/overrides, word joiner
+// and invisible operators, bidi isolates, BOM.
+// deno-lint-ignore no-control-regex -- matching control characters is the whole point (we refuse them)
+const HIDDEN_OR_CONTROL = /[\u0000-\u001f\u007f-\u009f\u00ad\u061c\u180e\u200b-\u200f\u202a-\u202e\u2060-\u2064\u2066-\u2069\ufeff]/;
 const LABEL = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/;
 
 /** P-2: identity = lower(trim(email)). No dot/plus folding: those are different people. */
@@ -11,7 +17,7 @@ export function normalizeEmail(raw: unknown): string {
   if (typeof raw !== "string") throw new HttpError(400, "invalid_email");
   if (raw.length > 320) throw new HttpError(400, "invalid_email");
   // any control char (CR/LF/TAB/NUL...) or bidi/zero-width => refuse, never "clean"
-  if (/[\u0000-\u001f\u007f-\u009f​-‏‪-‮⁠-⁤﻿]/.test(raw)) throw new HttpError(400, "invalid_email");
+  if (HIDDEN_OR_CONTROL.test(raw)) throw new HttpError(400, "invalid_email");
   const e = raw.trim().toLowerCase();
   if (e.length < 6 || e.length > 254) throw new HttpError(400, "invalid_email");
   const at = e.indexOf("@");

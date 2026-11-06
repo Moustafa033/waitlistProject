@@ -45,6 +45,11 @@ export function loadConfig(get: Env = denoEnv): Config {
   }
   const resendApiKey = need(get, "RESEND_API_KEY");
   if (!resendApiKey.startsWith("re_")) throw new ConfigError("RESEND_API_KEY looks wrong");
+  // A typo here must not silently switch the time trap off (NaN compares false) => fail closed.
+  const minFillRaw = (get("MIN_FILL_MS") ?? "2500").trim();
+  if (!/^\d{1,5}$/.test(minFillRaw) || Number(minFillRaw) < 500 || Number(minFillRaw) > 60000) {
+    throw new ConfigError("MIN_FILL_MS must be a whole number of milliseconds between 500 and 60000");
+  }
   return {
     supabaseUrl: need(get, "SUPABASE_URL").replace(/\/$/, ""),
     secretKey: secretKey(get),
@@ -55,6 +60,6 @@ export function loadConfig(get: Env = denoEnv): Config {
     resendApiKey,
     mailFrom: need(get, "MAIL_FROM"),
     consentVersion: need(get, "CONSENT_VERSION"),
-    minFillMs: Number(get("MIN_FILL_MS") ?? "2500"),
+    minFillMs: Number(minFillRaw),
   };
 }
