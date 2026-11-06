@@ -1,10 +1,15 @@
-# Copy to .github/workflows/waitlist-security.yml
+# Copy to .github/workflows/waitlist-security.yml (owner decision: CI files are reviewed by the owner).
+# Supply-chain rules (gym guide SC-9): actions pinned to a full commit SHA (a tag can be moved
+# by an attacker, a SHA cannot), read-only token, no credentials left on disk, no secrets used.
+# To update an action: look up the new tag's SHA with `git ls-remote --tags <repo>`, check the
+# release is at least a few days old, then change SHA + comment together.
 name: waitlist-security
 on: [push, pull_request]
 permissions: { contents: read }
 jobs:
   checks:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
     services:
       postgres:
         image: postgres:16
@@ -12,12 +17,15 @@ jobs:
         ports: ["5433:5432"]
         options: --health-cmd pg_isready --health-interval 5s --health-retries 10
     steps:
-      - uses: actions/checkout@v4   # pin to a commit SHA in your repo
-      - uses: denoland/setup-deno@v2
-        with: { deno-version: v2.x }
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1   # v7.0.1 (2026-07-17)
+        with: { persist-credentials: false }
+      - uses: denoland/setup-deno@22d081ff2d3a40755e97629de92e3bcbfa7cf2ed # v2.0.5 (2026-07-03)
+        with: { deno-version: "2.9.7" }                                    # exact, same as the owner's PC
+      - run: bash ci/check-hidden-unicode.sh .
       - run: bash ci/check-site.sh site
       - run: bash ci/check-functions.sh supabase
       - run: bash ci/check-migrations.sh supabase/migrations
+      - run: deno lint supabase/functions e2e/server.ts
       - run: deno check supabase/functions/waitlist/index.ts supabase/functions/email-events/index.ts e2e/server.ts
       - run: deno test supabase/functions/tests
       - run: sudo apt-get install -y postgresql-client && PGHOST=localhost bash tests/run_all.sh
