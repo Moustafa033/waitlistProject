@@ -1,0 +1,24 @@
+# Copy to .github/workflows/waitlist-security.yml
+name: waitlist-security
+on: [push, pull_request]
+permissions: { contents: read }
+jobs:
+  checks:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env: { POSTGRES_PASSWORD: postgres, POSTGRES_HOST_AUTH_METHOD: trust }
+        ports: ["5433:5432"]
+        options: --health-cmd pg_isready --health-interval 5s --health-retries 10
+    steps:
+      - uses: actions/checkout@v4   # pin to a commit SHA in your repo
+      - uses: denoland/setup-deno@v2
+        with: { deno-version: v2.x }
+      - run: bash ci/check-site.sh site
+      - run: bash ci/check-functions.sh supabase
+      - run: bash ci/check-migrations.sh supabase/migrations
+      - run: deno check supabase/functions/waitlist/index.ts supabase/functions/email-events/index.ts e2e/server.ts
+      - run: deno test supabase/functions/tests
+      - run: sudo apt-get install -y postgresql-client && PGHOST=localhost bash tests/run_all.sh
+        env: { PGPASSWORD: postgres }

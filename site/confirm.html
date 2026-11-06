@@ -1,0 +1,25 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="robots" content="noindex, nofollow">
+  <title>Confirm your email — Brand AI</title>
+  <link rel="stylesheet" href="/assets/app.css">
+  <script src="/assets/config.js" defer></script>
+  <script src="/assets/confirm.js" defer></script>
+  <script src="https://challenges.cloudflare.com/turnstile/v0/api.js?render=explicit" async defer></script>
+</head>
+<body>
+  <main class="card">
+    <h1>One last step</h1>
+    <!-- Opening this page changes NOTHING. Email security scanners (Safe Links,
+         Proofpoint, Mimecast...) open every link; only a person pressing the
+         button confirms. The token is in the #fragment, so it never reaches a server log. -->
+    <p>Press the button to confirm that you want launch emails from Brand AI.</p>
+    <div id="wl-turnstile" class="ts"></div>
+    <button id="wl-confirm" type="button" disabled>Confirm my email</button>
+    <p id="wl-status" class="status" role="status" aria-live="polite"></p>
+  </main>
+</body>
+</html>

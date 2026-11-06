@@ -1,0 +1,12 @@
+# Only the settings that matter for security. Merge into your real supabase/config.toml.
+
+# PUBLIC on purpose: visitors of the waitlist page have no account, so there is
+# no JWT to verify. The function itself enforces Origin, Turnstile, honeypot,
+# body caps, validation and the database enforces every limit. Do NOT copy this
+# setting to any other function.
+[functions.waitlist]
+verify_jwt = false
+
+# Called by the email provider (no JWT). Protected by the Svix signature check.
+[functions.email-events]
+verify_jwt = false
