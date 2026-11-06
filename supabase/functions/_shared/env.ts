@@ -12,6 +12,7 @@ export interface Config {
   turnstileHostnames: string[]; // hostnames the widget may be solved on
   resendApiKey: string;         // SENDING-ONLY key, restricted to the sending domain
   mailFrom: string;             // e.g. "Brand AI <hello@mail.example.com>"
+  mailReplyTo?: string;         // optional, e.g. "hello@example.com" (a real mailbox, e.g. at Hostinger)
   consentVersion: string;       // must equal private.settings.current_consent_version
   minFillMs: number;            // EXAMPLE: form filled faster than this => bot (weak signal)
 }
@@ -50,6 +51,11 @@ export function loadConfig(get: Env = denoEnv): Config {
   if (!/^\d{1,5}$/.test(minFillRaw) || Number(minFillRaw) < 500 || Number(minFillRaw) > 60000) {
     throw new ConfigError("MIN_FILL_MS must be a whole number of milliseconds between 500 and 60000");
   }
+  // Plain address only (no display name, no CR/LF): it goes into an email header.
+  const replyTo = (get("MAIL_REPLY_TO") ?? "").trim().toLowerCase();
+  if (replyTo !== "" && !/^[a-z0-9._%+-]{1,64}@[a-z0-9-]+(\.[a-z0-9-]+)*\.[a-z]{2,63}$/.test(replyTo)) {
+    throw new ConfigError("MAIL_REPLY_TO must be a plain email address");
+  }
   return {
     supabaseUrl: need(get, "SUPABASE_URL").replace(/\/$/, ""),
     secretKey: secretKey(get),
@@ -59,6 +65,7 @@ export function loadConfig(get: Env = denoEnv): Config {
     turnstileHostnames: need(get, "TURNSTILE_HOSTNAMES").split(",").map((h) => h.trim().toLowerCase()).filter(Boolean),
     resendApiKey,
     mailFrom: need(get, "MAIL_FROM"),
+    mailReplyTo: replyTo === "" ? undefined : replyTo,
     consentVersion: need(get, "CONSENT_VERSION"),
     minFillMs: Number(minFillRaw),
   };

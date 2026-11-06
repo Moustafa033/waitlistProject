@@ -1,4 +1,4 @@
-# Copy to .github/workflows/waitlist-security.yml (owner decision: CI files are reviewed by the owner).
+# Active CI workflow (owner-approved 2026-11-06). Changes to this file need owner review.
 # Supply-chain rules (gym guide SC-9): actions pinned to a full commit SHA (a tag can be moved
 # by an attacker, a SHA cannot), read-only token, no credentials left on disk, no secrets used.
 # To update an action: look up the new tag's SHA with `git ls-remote --tags <repo>`, check the

@@ -31,6 +31,20 @@ grep -qiE "unsafe-inline|unsafe-eval|unsafe-hashes|script-src[^;]*\*|default-src
 for d in "default-src 'none'" "frame-ancestors 'none'" "base-uri 'none'" "form-action 'none'"; do grep -q "$d" <<<"$csp" || bad "CSP missing $d"; done
 grep -qi 'Strict-Transport-Security' "$H" || bad "no HSTS"
 
+# 5b) Hostinger/Apache config (site/.htaccess) must carry the SAME CSP and the core headers
+A="$S/.htaccess"
+if [ -f "$A" ]; then
+  csp_h=$(sed -n 's/^[[:space:]]*Content-Security-Policy:[[:space:]]*//p' "$H")
+  csp_a=$(sed -n 's/^Header always set Content-Security-Policy "\(.*\)"$/\1/p' "$A")
+  [ -n "$csp_a" ] || bad ".htaccess has no CSP"
+  [ "$csp_a" = "$csp_h" ] || bad ".htaccess CSP differs from _headers"
+  for hd in Strict-Transport-Security X-Content-Type-Options X-Frame-Options Referrer-Policy; do
+    grep -q "^Header always set $hd " "$A" || bad ".htaccess missing $hd"
+  done
+  grep -qiE '^[[:space:]]*<IfModule' "$A" && bad ".htaccess uses <IfModule> (protection would silently disappear)"
+  grep -q '^Options -Indexes' "$A" || bad ".htaccess allows directory listing"
+fi
+
 # 6) the consent checkboxes must not be pre-ticked
 grep -RInE 'type="checkbox"[^>]*\bchecked\b' "$S" --include='*.html' && bad "pre-ticked consent box"
 

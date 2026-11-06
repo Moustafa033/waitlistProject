@@ -24,7 +24,8 @@ export async function sendMail(cfg: Config, m: Mail, fetchFn: typeof fetch = fet
         "content-type": "application/json",
         "idempotency-key": m.idempotencyKey,   // a retry never sends a second copy
       },
-      body: JSON.stringify({ from: cfg.mailFrom, to: [m.to], subject: m.subject, text: m.text, html: m.html, headers: m.headers }),
+      body: JSON.stringify({ from: cfg.mailFrom, to: [m.to], subject: m.subject, text: m.text, html: m.html, headers: m.headers,
+        ...(cfg.mailReplyTo ? { reply_to: cfg.mailReplyTo } : {}) }),   // replies land in the owner's real mailbox
       signal: AbortSignal.timeout(8000),
     });
   } catch {

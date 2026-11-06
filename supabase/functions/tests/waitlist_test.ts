@@ -109,6 +109,13 @@ Deno.test("config refuses legacy JWT keys and wildcard/insecure origins", () => 
     SUPABASE_SECRET_KEYS: JSON.stringify({ default: "sb_secret_abc" }) };
   eq(loadConfig((n) => base[n]).secretKey, "sb_secret_abc");
   eq(loadConfig((n) => base[n]).minFillMs, 2500, "default time trap");
+  eq(loadConfig((n) => base[n]).mailReplyTo, undefined, "reply-to is optional");
+  eq(loadConfig((n) => (n === "MAIL_REPLY_TO" ? " Hello@Example.com " : base[n])).mailReplyTo, "hello@example.com");
+  for (const v of ["hello@example.com\r\nBcc: x@y.com", "Name <hello@example.com>", "not-an-email", "a@b.com,c@d.com"]) {
+    let threw = false;
+    try { loadConfig((n) => (n === "MAIL_REPLY_TO" ? v : base[n])); } catch (e) { threw = e instanceof ConfigError; }
+    assert(threw, `MAIL_REPLY_TO=${JSON.stringify(v)} must be refused (header injection)`);
+  }
   eq(loadConfig((n) => (n === "MIN_FILL_MS" ? "3000" : base[n])).minFillMs, 3000);
   for (const [k, v] of [["SUPABASE_SECRET_KEYS", JSON.stringify({ default: "eyJhbGciOi..." })], ["SITE_ORIGIN", "*"], ["SITE_ORIGIN", "http://evil.com"], ["RESEND_API_KEY", "sk_live"],
                         ["MIN_FILL_MS", "abc"], ["MIN_FILL_MS", "2.5s"], ["MIN_FILL_MS", "0"], ["MIN_FILL_MS", "-1"], ["MIN_FILL_MS", "999999"], ["MIN_FILL_MS", ""]]) {
@@ -137,6 +144,17 @@ Deno.test("signup happy path: Turnstile checked, RPC called with normalized emai
   assert(!m.text.includes("?t="), "no token in query string");
   const order = calls.map((c) => c.url.includes("cloudflare") ? "ts" : c.url.includes("rpc") ? "rpc" : "mail");
   eq(order, ["ts", "rpc", "mail"], "Turnstile must run BEFORE the database");
+});
+
+Deno.test("confirmation mail carries reply_to only when configured", async () => {
+  for (const replyTo of [undefined, "hello@example.com"]) {
+    const { f, calls } = fakeFetch();
+    const d = { ...deps(f), cfg: { ...cfg, mailReplyTo: replyTo } };
+    eq((await makeHandler(d)(req("signup", goodBody()))).status, 202);
+    await settle();
+    const m = JSON.parse(calls.find((c) => c.url.startsWith("https://api.resend.com"))!.body!);
+    eq(m.reply_to, replyTo, "reply_to");
+  }
 });
 
 Deno.test("signup answers are byte-identical for sent / already-on-list / limited / bot (no enumeration)", async () => {
