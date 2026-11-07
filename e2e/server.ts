@@ -5,6 +5,8 @@ import { makeHandler } from "../supabase/functions/waitlist/handler.ts";
 import type { Config } from "../supabase/functions/_shared/env.ts";
 
 const SITE = 8787, API = 8788;
+// The real project URL in site/ is swapped for the local test API (written without backslashes on purpose).
+const SUPABASE_ORIGIN = new RegExp("https://[a-z0-9]+[.]supabase[.]co");
 const siteDir = new URL("../site/", import.meta.url).pathname;
 const DB = Deno.env.get("DB") ?? "waitlist_test";
 
@@ -64,7 +66,7 @@ for (const line of headersFile.split("\n")) {
   if (line.startsWith("/*")) { inGlobal = true; continue; }
   if (/^\S/.test(line)) inGlobal = false;
   const m = line.match(/^\s+([A-Za-z-]+):\s*(.*)$/);
-  if (inGlobal && m) global.push([m[1], m[2].replace("https://YOUR-PROJECT-REF.supabase.co", `http://localhost:${API}`).replace("; upgrade-insecure-requests", "")]);
+  if (inGlobal && m) global.push([m[1], m[2].replace(SUPABASE_ORIGIN, `http://localhost:${API}`).replace("; upgrade-insecure-requests", "")]);
 }
 const types: Record<string, string> = { html: "text/html; charset=utf-8", js: "text/javascript", css: "text/css", txt: "text/plain" };
 Deno.serve({ hostname: HOST, port: SITE, onListen: () => console.log("e2e ready") }, async (req) => {
@@ -74,7 +76,7 @@ Deno.serve({ hostname: HOST, port: SITE, onListen: () => console.log("e2e ready"
   if (p.includes("..")) return new Response("no", { status: 400 });
   try {
     let body = await Deno.readTextFile(siteDir + p.slice(1));
-    if (p === "/assets/config.js") body = body.replace("https://YOUR-PROJECT-REF.supabase.co/functions/v1/waitlist", `http://localhost:${API}/functions/v1/waitlist`);
+    if (p === "/assets/config.js") body = body.replace(SUPABASE_ORIGIN, `http://localhost:${API}`);
     return new Response(body, { headers: [...global, ["content-type", types[p.split(".").pop()!] ?? "text/plain"]] });
   } catch { return new Response("not found", { status: 404 }); }
 });

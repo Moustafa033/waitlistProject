@@ -1,5 +1,5 @@
 # Hostinger (LiteSpeed / Apache) configuration. Upload the CONTENTS of site/ into public_html/.
-# Replace YOUR-DOMAIN (e.g. example.com, no https://) and YOUR-PROJECT-REF before uploading.
+# Configured for creatinginpublic.com and Supabase project opynnvrkbrmtfrneefxm.
 # Turn on hPanel -> Security -> SSL -> "Force HTTPS" as well.
 #
 # No <IfModule> wrappers on purpose: if headers or rewrites are not supported, the server
@@ -14,9 +14,9 @@ ErrorDocument 404 /404.html
 RewriteEngine On
 
 # 1) Exactly ONE origin. The backend accepts requests only from SITE_ORIGIN, so
-#    www.YOUR-DOMAIN (or the Hostinger preview address) is sent to the real address.
-RewriteCond %{HTTP_HOST} !^YOUR-DOMAIN$ [NC]
-RewriteRule ^ https://YOUR-DOMAIN%{REQUEST_URI} [R=301,L]
+#    www.creatinginpublic.com (or the Hostinger preview address) is sent to the real address.
+RewriteCond %{HTTP_HOST} !^creatinginpublic[.]com$ [NC]
+RewriteRule ^ https://creatinginpublic.com%{REQUEST_URI} [R=301,L]
 
 # 2) Never serve hidden files (.htaccess, .git, .env, ...) except /.well-known/, nor our config notes.
 RewriteRule (^|/)\.(?!well-known/) - [F,L]
@@ -29,7 +29,7 @@ RewriteCond %{DOCUMENT_ROOT}/$1.html -f
 RewriteRule ^([a-z0-9-]+)/?$ $1.html [L]
 
 # 4) Security headers (same as site/_headers)
-Header always set Content-Security-Policy "default-src 'none'; script-src 'self' https://challenges.cloudflare.com; frame-src https://challenges.cloudflare.com; connect-src https://YOUR-PROJECT-REF.supabase.co; style-src 'self'; img-src 'self' data:; font-src 'self'; manifest-src 'self'; form-action 'none'; base-uri 'none'; frame-ancestors 'none'; upgrade-insecure-requests"
+Header always set Content-Security-Policy "default-src 'none'; script-src 'self' https://challenges.cloudflare.com; frame-src https://challenges.cloudflare.com; connect-src https://opynnvrkbrmtfrneefxm.supabase.co; style-src 'self'; img-src 'self' data:; font-src 'self'; manifest-src 'self'; form-action 'none'; base-uri 'none'; frame-ancestors 'none'; upgrade-insecure-requests"
 Header always set Strict-Transport-Security "max-age=31536000; includeSubDomains"
 Header always set X-Content-Type-Options "nosniff"
 Header always set X-Frame-Options "DENY"
