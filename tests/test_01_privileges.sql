@@ -17,8 +17,14 @@ select t.ok(not exists (select 1 from pg_class c where c.relnamespace = 'private
      and (has_table_privilege('service_role', c.oid, 'select') or has_table_privilege('service_role', c.oid, 'insert')
        or has_table_privilege('service_role', c.oid, 'update') or has_table_privilege('service_role', c.oid, 'delete'))),
   'even service_role has no direct table access (RPCs only => every rule always runs)');
-select t.ok((select count(*) from pg_proc p where p.pronamespace = 'public'::regnamespace and p.proname like 'waitlist_%'
-               and has_function_privilege('service_role', p.oid, 'execute')) = 10, 'service_role can execute the 10 waitlist RPCs');
+-- EXACT list (not a count): any new public function must be added here on purpose, or this fails.
+select t.ok((select array_agg(p.proname::text order by p.proname::text collate "C") from pg_proc p
+              where p.pronamespace = 'public'::regnamespace and has_function_privilege('service_role', p.oid, 'execute')
+                and p.proname like 'waitlist_%')
+            = array['waitlist_confirm','waitlist_erase','waitlist_erase_by_token','waitlist_export_confirmed',
+                    'waitlist_maintenance','waitlist_public_count','waitlist_send_failed','waitlist_signup',
+                    'waitlist_suppress','waitlist_unsub_token','waitlist_unsubscribe'],
+  'service_role can execute exactly the 11 known waitlist RPCs (no surprise functions)');
 
 set role anon;
 select t.fails($$select public.waitlist_signup('a@example.com','waitlist-v1')$$, '42501', 'anon calls waitlist_signup directly');
@@ -29,6 +35,10 @@ reset role;
 set role authenticated;
 select t.fails($$select public.waitlist_erase('a@example.com')$$, '42501', 'authenticated erases someone');
 select t.fails($$select public.waitlist_unsub_token(gen_random_uuid())$$, '42501', 'authenticated mints unsubscribe tokens');
+select t.fails($$select public.waitlist_erase_by_token(gen_random_uuid(), repeat('A', 43))$$, '42501', 'authenticated calls delete-by-link directly');
+reset role;
+set role anon;
+select t.fails($$select public.waitlist_erase_by_token(gen_random_uuid(), repeat('A', 43))$$, '42501', 'anon calls delete-by-link directly');
 reset role;
 set role service_role;
 select t.fails($$select * from private.signups$$, '42501', 'service_role reads the table directly');
