@@ -13,6 +13,9 @@ if [ ! -d "$here/node_modules/playwright" ]; then
 fi
 
 bash "$here/../tests/run_all.sh" >/dev/null
+# the test DB starts at the migration default; set it to the version the page shows (like production)
+cv=$(sed -n 's/.*data-consent-version="\([a-z0-9-]*\)".*/\1/p' "$here/../site/index.html")
+psql -h "${PGHOST:-/tmp}" -p "${PGPORT:-5433}" -U postgres -d waitlist_test -qc "update private.settings set value = '$cv' where key = 'current_consent_version'"
 deno run --allow-net=localhost:8787,localhost:8788 --allow-read="$here/../site" --allow-env=DB --allow-run=psql "$here/server.ts" & SRV=$!
 trap 'kill $SRV 2>/dev/null' EXIT
 sleep 3

@@ -45,10 +45,12 @@ const fakeFetch = (async (input: string | URL | Request, init?: RequestInit) => 
   throw new Error("unexpected " + url);
 }) as typeof fetch;
 
+// The consent version comes from the page itself (data-consent-version), like production must match it.
+const CONSENT_VERSION = (await Deno.readTextFile(siteDir + "index.html")).match(/data-consent-version="([a-z0-9-]+)"/)![1];
 const cfg: Config = {
   supabaseUrl: "http://db.invalid", secretKey: "sb_secret_e2e", siteOrigin: `http://localhost:${SITE}`,
   functionBaseUrl: `http://localhost:${API}/functions/v1/waitlist`, turnstileSecret: "x", turnstileHostnames: ["localhost"],
-  resendApiKey: "re_e2e", mailFrom: "Brand AI <hello@mail.example.com>", consentVersion: "waitlist-v1", minFillMs: 2500,
+  resendApiKey: "re_e2e", mailFrom: "Brand AI <hello@mail.example.com>", consentVersion: CONSENT_VERSION, minFillMs: 2500,
 };
 const api = makeHandler({ cfg, fetchFn: fakeFetch, background: (p) => { p.catch(() => {}); } });
 // Bind to loopback ONLY. Deno.serve defaults to 0.0.0.0 (every network interface), which
