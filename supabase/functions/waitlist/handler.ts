@@ -60,7 +60,14 @@ export function makeHandler(d: Deps): (req: Request) => Promise<Response> {
       const { token, signup_id, send_no, hour } = r;
       d.background((async () => {
         try {
-          await sendMail(cfg, confirmationMail(cfg, email, token, signup_id, send_no), d.fetchFn);
+          let unsubToken: string;
+          try {
+            unsubToken = await rpc<string>(cfg, "waitlist_unsub_token", { p_signup_id: signup_id }, d.fetchFn);
+            if (!isToken(unsubToken)) throw new Error("unsub token");
+          } catch {
+            throw new ProviderNotReached();   // never sent => give the global units back
+          }
+          await sendMail(cfg, confirmationMail(cfg, email, token, signup_id, send_no, unsubToken), d.fetchFn);
           log("waitlist.mail", 200, "sent");
         } catch (e) {
           if (e instanceof ProviderNotReached) {
@@ -113,6 +120,19 @@ export function makeHandler(d: Deps): (req: Request) => Promise<Response> {
     return json(200, { ok: r.ok === true }, cors);
   }
 
+  // "Delete my data": browser only (our unsubscribe page, explicit button), same signed link as
+  // unsubscribe. No one-click/form path: deletion is never triggered by a mail provider or scanner.
+  async function erase(req: Request): Promise<Response> {
+    requireOrigin(req, cfg.siteOrigin);
+    if (!(req.headers.get("content-type") ?? "").startsWith("application/json")) throw new HttpError(415, "invalid_body");
+    const body = parseJsonObject(await readBodyCapped(req, 1024));
+    onlyKeys(body, ["id", "t"]);
+    if (!isUuid(body.id) || !isToken(body.t)) return json(200, { ok: false }, cors);
+    const r = await rpc<{ ok: boolean }>(cfg, "waitlist_erase_by_token", { p_signup_id: body.id, p_token: body.t }, d.fetchFn);
+    log("waitlist.erase", 200, r.ok ? "erased" : "bad_token");
+    return json(200, { ok: r.ok === true }, cors);
+  }
+
   // tiny per-instance cache: a flood of GET /count does not become a flood of DB calls
   let cached: { n: number; at: number } | null = null;
   async function count(): Promise<Response> {
@@ -125,7 +145,7 @@ export function makeHandler(d: Deps): (req: Request) => Promise<Response> {
   return async (req: Request): Promise<Response> => {
     const url = new URL(req.url);
     const last = url.pathname.replace(/\/+$/, "").split("/").pop() ?? "";
-    const route = ["signup", "confirm", "unsubscribe", "count"].includes(last) ? last : "unknown"; // never log raw paths
+    const route = ["signup", "confirm", "unsubscribe", "erase", "count"].includes(last) ? last : "unknown"; // never log raw paths
     try {
       if (req.method === "OPTIONS") {
         // preflight only for our own site; others get no CORS grant
@@ -136,6 +156,7 @@ export function makeHandler(d: Deps): (req: Request) => Promise<Response> {
       if (route === "signup") return await signup(req);
       if (route === "confirm") return await confirm(req);
       if (route === "unsubscribe") return await unsubscribe(req, url);
+      if (route === "erase") return await erase(req);
       throw new HttpError(404, "not_found");
     } catch (e) {
       if (e instanceof HttpError) {

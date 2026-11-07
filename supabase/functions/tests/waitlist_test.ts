@@ -43,6 +43,7 @@ function fakeFetch(opts: { rpc?: Record<string, unknown>; turnstile?: Record<str
         waitlist_signup: { action: "send", token: TOKEN, signup_id: "11111111-1111-4111-8111-111111111111", send_no: 1, hour: "2026-11-06T10:00:00Z" },
         waitlist_confirm: { ok: true }, waitlist_unsubscribe: { ok: true }, waitlist_public_count: 1230,
         waitlist_send_failed: null, waitlist_suppress: null,
+        waitlist_unsub_token: "U".repeat(43), waitlist_erase_by_token: { ok: true },
       };
       return Response.json(opts.rpc?.[name] ?? def[name]);
     }
@@ -142,8 +143,11 @@ Deno.test("signup happy path: Turnstile checked, RPC called with normalized emai
   eq(m.to, ["ahmed@example.com"]);
   assert(m.text.includes(`${ORIGIN}/confirm#t=${TOKEN}`), "token must be in the fragment, not the query");
   assert(!m.text.includes("?t="), "no token in query string");
-  const order = calls.map((c) => c.url.includes("cloudflare") ? "ts" : c.url.includes("rpc") ? "rpc" : "mail");
-  eq(order, ["ts", "rpc", "mail"], "Turnstile must run BEFORE the database");
+  assert(m.text.includes(`${ORIGIN}/unsubscribe#id=11111111-1111-4111-8111-111111111111&t=${"U".repeat(43)}`),
+    "personal unsubscribe / delete-my-data link (signed, in the fragment) is in the confirmation email");
+  // Turnstile first, then the signup RPC; the signed-link RPC and the mail run in the background.
+  const order = calls.map((c) => c.url.includes("cloudflare") ? "ts" : c.url.includes("rpc") ? c.url.split("/").pop() : "mail");
+  eq(order, ["ts", "waitlist_signup", "waitlist_unsub_token", "mail"], "Turnstile must run BEFORE the database");
 });
 
 Deno.test("confirmation mail carries reply_to only when configured", async () => {
@@ -207,6 +211,39 @@ Deno.test("mail provider unreachable -> global send unit refunded, visitor sees 
   eq((await makeHandler(deps(f2))(req("signup", goodBody()))).status, 202);
   await settle();
   assert(!c2.some((c) => c.url.endsWith("/rpc/waitlist_send_failed")), "provider answered (500) -> no refund (it may have sent)");
+});
+
+Deno.test("signed link cannot be made -> no mail without it, global units refunded, same 202", async () => {
+  for (const bad of ["short", "", 42]) {
+    const { f, calls } = fakeFetch({ rpc: { waitlist_unsub_token: bad } as Record<string, unknown> });
+    eq((await makeHandler(deps(f))(req("signup", goodBody()))).status, 202);
+    await settle();
+    assert(!calls.some((c) => c.url.startsWith("https://api.resend.com")), "no email without a valid personal link");
+    assert(calls.some((c) => c.url.endsWith("/rpc/waitlist_send_failed")), "units given back (provider never reached)");
+  }
+});
+
+Deno.test("erase ('Delete my data'): only our page (Origin + JSON) with a well-formed signed link; never via GET or one-click", async () => {
+  const { f, calls } = fakeFetch();
+  const h = makeHandler(deps(f));
+  const id = "11111111-1111-4111-8111-111111111111";
+  eq(await (await h(req("erase", { id, t: TOKEN }))).json(), { ok: true });
+  eq(JSON.parse(calls.at(-1)!.body!), { p_signup_id: id, p_token: TOKEN });
+  const before = calls.length;
+  eq(await (await h(req("erase", { id: "not-a-uuid", t: TOKEN }))).json(), { ok: false }, "bad id");
+  eq(await (await h(req("erase", { id, t: "short" }))).json(), { ok: false }, "bad token");
+  eq(calls.length, before, "malformed link: no database call at all");
+  eq((await h(req("erase", { id, t: TOKEN }, { "content-type": "application/json" }))).status, 403, "no Origin (other site / script)");
+  eq((await h(req("erase", { id, t: TOKEN }, { origin: "https://evil.com", "content-type": "application/json" }))).status, 403, "foreign Origin");
+  eq((await h(new Request(`https://ref.supabase.co/functions/v1/waitlist/erase?id=${id}&t=${TOKEN}`, {
+    method: "POST", headers: { "content-type": "application/x-www-form-urlencoded" }, body: "List-Unsubscribe=One-Click" }))).status, 403,
+    "one-click / form post never deletes (mail providers and scanners have no Origin)");
+  eq((await h(req("erase", "id=x", { origin: ORIGIN, "content-type": "application/x-www-form-urlencoded" }))).status, 415,
+    "form post even from our own origin is refused (JSON only)");
+  eq((await h(req("erase", { id, t: TOKEN, status: "x" }))).status, 400, "extra keys refused");
+  eq((await h(req("erase", null, {}, "GET"))).status, 405, "GET never deletes");
+  const { f: f2 } = fakeFetch({ rpc: { waitlist_erase_by_token: { ok: false } } });
+  eq(await (await makeHandler(deps(f2))(req("erase", { id, t: TOKEN }))).json(), { ok: false }, "database refuses a wrong signature");
 });
 
 Deno.test("internal errors never leak details", async () => {

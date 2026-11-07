@@ -36,13 +36,15 @@ export async function sendMail(cfg: Config, m: Mail, fetchFn: typeof fetch = fet
 
 /** Confirmation email. The token goes in the URL FRAGMENT (#): browsers never
  *  send fragments to servers, so it is not in any log, proxy or Referer. */
-export function confirmationMail(cfg: Config, to: string, token: string, signupId: string, sendNo: number): Mail {
+export function confirmationMail(cfg: Config, to: string, token: string, signupId: string, sendNo: number, unsubToken: string): Mail {
   const link = `${cfg.siteOrigin}/confirm#t=${token}`;
+  // Personal "unsubscribe / delete my data" page (signed link, in the fragment like the token).
+  const manage = `${cfg.siteOrigin}/unsubscribe#id=${encodeURIComponent(signupId)}&t=${encodeURIComponent(unsubToken)}`;
   return {
     to,
     subject: "Confirm your spot on the waitlist",
-    text: `Tap the link, then press the "Confirm" button:\n${link}\n\nDidn't sign up? Ignore this email. Without confirmation we will not email you again, and the address is deleted automatically.`,
-    html: `<p>Tap the link, then press the <b>Confirm</b> button:</p><p><a href="${link}">Confirm my email</a></p><p>Didn't sign up? Ignore this email. Without confirmation we will not email you again, and the address is deleted automatically.</p>`,
+    text: `Tap the link, then press the "Confirm" button:\n${link}\n\nDidn't sign up? Ignore this email. Without confirmation we will not email you again, and the address is deleted automatically.\n\nUnsubscribe or delete your data at any time: ${manage}`,
+    html: `<p>Tap the link, then press the <b>Confirm</b> button:</p><p><a href="${link}">Confirm my email</a></p><p>Didn't sign up? Ignore this email. Without confirmation we will not email you again, and the address is deleted automatically.</p><p style="font-size:12px"><a href="${manage}">Unsubscribe or delete your data</a></p>`,
     idempotencyKey: `confirm/${signupId}/${sendNo}`,
   };
 }

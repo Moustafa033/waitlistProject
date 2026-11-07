@@ -128,6 +128,14 @@ practice the global caps in the DB are the real protection.
   cannot be guessed, cannot be reused for another person. Unsubscribe is idempotent and honored
   immediately (the rules allow up to 2 days; we do it at once).
 
+### 3.3b `POST /erase` — self-service "Delete my data" (migration 0003)
+- Same signed personal link as unsubscribe (`/unsubscribe#id=…&t=…`, also included in the
+  confirmation email). Button on our page only: exact Origin + JSON + known keys; **no** one-click /
+  form path and never on GET, so mail providers and link scanners can never delete anyone.
+- The page asks for a second click (deletion cannot be undone).
+- `waitlist_erase_by_token` verifies the HMAC in SQL, deletes the row at once, keeps only the keyed
+  hash in `suppressions` (never emailed again) and an anonymous `erased` consent event. Idempotent.
+
 ### 3.4 `GET /count` (optional)
 - Rounded down to the nearest 10 so a watcher cannot detect one specific signup. `Cache-Control:
   public, max-age=300`. Delete the endpoint if the page does not show a counter.

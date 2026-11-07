@@ -79,3 +79,31 @@ select t.ok(exists (select 1 from private.signups where email='back@example.com'
 set role service_role;
 select t.ok((public.waitlist_confirm((select v->>'token' from r where k='back2'))->>'ok')::boolean, 'returning person can still confirm after the cleanup');
 reset role;
+
+-- self-service "Delete my data" (0003): only with the person's own signed link
+set role service_role;
+insert into r values ('del', public.waitlist_signup('erase-me@example.com', 'waitlist-v1'));
+create temp table del_id as select (v->>'signup_id')::uuid id from r where k = 'del';
+select t.ok((public.waitlist_erase_by_token((select id from del_id), 'x' || repeat('y', 42))->>'ok')::boolean = false,
+  'forged delete token -> refused');
+select t.ok((public.waitlist_erase_by_token((select id from del_id),
+             public.waitlist_unsub_token((select (v->>'signup_id')::uuid from r where k = 'back2')))->>'ok')::boolean = false,
+  'another person''s token cannot delete this person');
+select t.ok((public.waitlist_erase_by_token(null, 'x')->>'ok')::boolean = false, 'missing id/token -> refused');
+reset role;
+select t.ok(exists (select 1 from private.signups where email = 'erase-me@example.com'), 'refused attempts deleted nothing');
+set role service_role;
+select t.ok((public.waitlist_erase_by_token((select id from del_id), public.waitlist_unsub_token((select id from del_id)))->>'ok')::boolean,
+  'own signed link -> deleted');
+select t.ok((public.waitlist_erase_by_token((select id from del_id), public.waitlist_unsub_token((select id from del_id)))->>'ok')::boolean,
+  'same link again -> still ok (idempotent, reveals nothing)');
+reset role;
+select t.ok(not exists (select 1 from private.signups where email = 'erase-me@example.com'), 'row is gone immediately');
+select t.ok(exists (select 1 from private.consent_events where event = 'erased' and detail->>'method' = 'self_service_link'),
+  'anonymous erased event logged');
+select t.ok(not exists (select 1 from private.consent_events where signup_id = (select id from del_id)),
+  'no consent event still points at the deleted person');
+set role service_role;
+select t.ok(public.waitlist_signup('erase-me@example.com', 'waitlist-v1')->>'reason' = 'suppressed',
+  'deleted person is never emailed again (replayed signup is suppressed)');
+reset role;

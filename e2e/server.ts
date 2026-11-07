@@ -16,6 +16,8 @@ const SQL: Record<string, string> = {
   waitlist_confirm: "select to_jsonb(public.waitlist_confirm(j->>'p_token'))",
   waitlist_unsubscribe: "select to_jsonb(public.waitlist_unsubscribe((j->>'p_signup_id')::uuid, j->>'p_token'))",
   waitlist_public_count: "select to_jsonb(public.waitlist_public_count())",
+  waitlist_unsub_token: "select to_jsonb(public.waitlist_unsub_token((j->>'p_signup_id')::uuid))",
+  waitlist_erase_by_token: "select to_jsonb(public.waitlist_erase_by_token((j->>'p_signup_id')::uuid, j->>'p_token'))",
 };
 async function psqlRpc(name: string, args: unknown): Promise<string> {
   const sql = SQL[name];
