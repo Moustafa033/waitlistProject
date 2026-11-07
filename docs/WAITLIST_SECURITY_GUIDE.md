@@ -175,7 +175,8 @@ lookup failure as "allow" (DNS hiccups must not lose real people) — it only re
 Attackers submit a victim's address into thousands of forms to bury a real alert email. Our limits:
 - per address: minimum gap between confirmation emails (example 30 min) and a **lifetime** cap
   (example 3) that is never reset — not by re-signup, not by unsubscribe.
-- global: confirmation emails per hour (example 500), new rows per day (example 5000).
+- global: confirmation emails per hour (example 500) **and per day** (example 90, migration 0002 —
+  must stay below the email plan's daily limit, e.g. Resend free = 100/day), new rows per day (example 5000).
 - Turnstile on signup, identical answers, nothing user-controlled in the email.
 Result: our site can send any one address at most 3 emails while its row exists (tested, including 50
 parallel submits of one address → exactly 1 email). Note: the 30-day deletion of never-confirmed rows
