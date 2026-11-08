@@ -39,7 +39,16 @@ Header always set Cross-Origin-Opener-Policy "same-origin"
 Header always set Cross-Origin-Resource-Policy "same-origin"
 Header always unset X-Powered-By
 
-# Pages that receive tokens in the #fragment: never cached
+# HTML, JS and CSS: the browser must re-check with the server every time (cheap: ETag, 304).
+# Otherwise an update (new consent version, new code) reaches visitors only days later, and a
+# stale page sends an old consent version that the server must refuse ("reload_page").
+<FilesMatch "\.(html|js|css)$">
+  Header unset Cache-Control
+  Header unset Expires
+  Header always set Cache-Control "no-cache"
+</FilesMatch>
+
+# Pages that receive tokens in the #fragment: never cached at all
 <FilesMatch "^(confirm|unsubscribe)\.html$">
   Header always set Cache-Control "no-store"
 </FilesMatch>
