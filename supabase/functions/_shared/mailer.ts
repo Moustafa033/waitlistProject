@@ -40,13 +40,48 @@ export function confirmationMail(cfg: Config, to: string, token: string, signupI
   const link = `${cfg.siteOrigin}/confirm#t=${token}`;
   // Personal "unsubscribe / delete my data" page (signed link, in the fragment like the token).
   const manage = `${cfg.siteOrigin}/unsubscribe#id=${encodeURIComponent(signupId)}&t=${encodeURIComponent(unsubToken)}`;
+  const ignore = "Didn't sign up? Just ignore this email. We won't email you again, and your address is deleted automatically.";
   return {
     to,
-    subject: "Confirm your spot on the waitlist",
-    text: `Tap the link, then press the "Confirm" button:\n${link}\n\nDidn't sign up? Ignore this email. Without confirmation we will not email you again, and the address is deleted automatically.\n\nUnsubscribe or delete your data at any time: ${manage}`,
-    html: `<p>Tap the link, then press the <b>Confirm</b> button:</p><p><a href="${link}">Confirm my email</a></p><p>Didn't sign up? Ignore this email. Without confirmation we will not email you again, and the address is deleted automatically.</p><p style="font-size:12px"><a href="${manage}">Unsubscribe or delete your data</a></p>`,
+    subject: "You acted on it",
+    text: `You acted on it\n\nThanks for signing up. One more tap and you're on the list.\n\nConfirm: ${link}\n\n${ignore}\n\nCreating in Public\nUnsubscribe or delete your data: ${manage}`,
+    html: confirmationHtml(cfg, esc(link), esc(manage), ignore),
     idempotencyKey: `confirm/${signupId}/${sendNo}`,
   };
+}
+
+/** Escapes a value for an HTML attribute or text. Every value here is already ours (validated origin,
+ *  random URL-safe tokens, a UUID), so this is defence in depth, not the main protection. */
+function esc(s: string): string {
+  return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&#39;");
+}
+
+/** Email-safe HTML (tables + inline styles: Gmail/Outlook ignore <style> blocks and SVG).
+ *  No tracking pixel, no outside fonts; the only image is the logo from our own site. */
+function confirmationHtml(cfg: Config, link: string, manage: string, ignore: string): string {
+  const font = "-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif";
+  const logo = `${esc(cfg.siteOrigin)}/email-logo.png`;   // the one image allowed cross-origin (see site/.htaccess)
+  return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="color-scheme" content="light"><title>You acted on it</title></head>
+<body style="margin:0;padding:0;background:#f4f4f3;">
+<div style="display:none;max-height:0;overflow:hidden;opacity:0;mso-hide:all;">One more tap and you're on the list.</div>
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="background:#f4f4f3;"><tr><td align="center" style="padding:32px 16px;">
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="max-width:480px;background:#ffffff;border:1px solid #ececea;border-radius:14px;">
+<tr><td style="padding:28px 26px;font-family:${font};color:#111111;">
+<table role="presentation" cellpadding="0" cellspacing="0" border="0"><tr>
+<td style="padding-right:8px;vertical-align:middle;"><img src="${logo}" width="20" height="20" alt="" style="display:block;border:0;"></td>
+<td style="vertical-align:middle;font-size:15px;font-weight:600;letter-spacing:-0.2px;color:#111111;">Creating in Public</td>
+</tr></table>
+<h1 style="margin:22px 0 0;font-size:24px;line-height:1.2;font-weight:700;letter-spacing:-0.6px;color:#111111;">You acted on it</h1>
+<div style="margin:8px 0 16px;width:150px;height:3px;border-radius:3px;background-color:#8f7cf0;background-image:linear-gradient(90deg,#ff8a3d,#6b7bff);line-height:3px;font-size:0;">&nbsp;</div>
+<p style="margin:0 0 20px;font-size:15px;line-height:1.55;color:#2b2b2b;">Thanks for signing up. One more tap and you're on the list.</p>
+<table role="presentation" cellpadding="0" cellspacing="0" border="0"><tr><td style="border-radius:999px;background:#111111;">
+<a href="${link}" style="display:inline-block;padding:13px 28px;font-family:${font};font-size:15px;font-weight:600;color:#ffffff;text-decoration:none;border-radius:999px;">Confirm</a>
+</td></tr></table>
+<p style="margin:22px 0 0;font-size:12px;line-height:1.5;color:#6b6b6b;">${esc(ignore)}</p>
+<p style="margin:18px 0 0;padding-top:14px;border-top:1px solid #ececea;font-size:12px;line-height:1.5;color:#6b6b6b;">Creating in Public &middot; <a href="${manage}" style="color:#6b6b6b;">Unsubscribe or delete your data</a></p>
+</td></tr></table>
+</td></tr></table>
+</body></html>`;
 }
 
 /** Headers every marketing/launch email MUST carry (Gmail/Yahoo/Microsoft bulk rules, RFC 8058). */

@@ -48,6 +48,12 @@ Header always unset X-Powered-By
   Header always set Cache-Control "no-cache"
 </FilesMatch>
 
+# The logo inside our emails is loaded by mail apps from other origins. Allow that for this ONE
+# public image only; every other file keeps Cross-Origin-Resource-Policy: same-origin.
+<FilesMatch "^email-logo\.png$">
+  Header always set Cross-Origin-Resource-Policy "cross-origin"
+</FilesMatch>
+
 # Pages that receive tokens in the #fragment: never cached at all
 <FilesMatch "^(confirm|unsubscribe)\.html$">
   Header always set Cache-Control "no-store"

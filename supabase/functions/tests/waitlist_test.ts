@@ -145,6 +145,14 @@ Deno.test("signup happy path: Turnstile checked, RPC called with normalized emai
   assert(!m.text.includes("?t="), "no token in query string");
   assert(m.text.includes(`${ORIGIN}/unsubscribe#id=11111111-1111-4111-8111-111111111111&t=${"U".repeat(43)}`),
     "personal unsubscribe / delete-my-data link (signed, in the fragment) is in the confirmation email");
+  // HTML version: same two links (HTML-escaped), the "ignore" line, no tracking image, only our own image.
+  eq(m.subject, "You acted on it");
+  assert(m.html.includes(`href="${ORIGIN}/confirm#t=${TOKEN}"`), "HTML confirm button uses the fragment link");
+  assert(m.html.includes(`href="${ORIGIN}/unsubscribe#id=11111111-1111-4111-8111-111111111111&amp;t=${"U".repeat(43)}"`), "HTML unsubscribe link, escaped");
+  assert(m.html.includes("Didn&#39;t sign up?") && m.text.includes("Didn't sign up?"), "ignore line in both versions (HTML-escaped in the HTML part)");
+  const imgs = [...m.html.matchAll(/<img[^>]+src="([^"]+)"/g)].map((x) => x[1]);
+  eq(imgs, [`${ORIGIN}/email-logo.png`], "only image is our own logo (no tracking pixel)");
+  assert(!/ahmed@example\.com/.test(m.html + m.text + m.subject), "the recipient's address is never echoed into the email");
   // Turnstile first, then the signup RPC; the signed-link RPC and the mail run in the background.
   const order = calls.map((c) => c.url.includes("cloudflare") ? "ts" : c.url.includes("rpc") ? c.url.split("/").pop() : "mail");
   eq(order, ["ts", "waitlist_signup", "waitlist_unsub_token", "mail"], "Turnstile must run BEFORE the database");
