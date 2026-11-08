@@ -2,3 +2,4 @@
 * text=auto eol=lf
 *.woff2 binary
 *.png binary
+*.ico binary
