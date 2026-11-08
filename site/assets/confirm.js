@@ -39,7 +39,7 @@
         body: JSON.stringify({ token, turnstile: tsToken }),
       });
       const data = await res.json().catch(() => ({}));
-      if (res.ok && data.ok === true) { done = true; say("You're on the list. We'll email you at launch."); }
+      if (res.ok && data.ok === true) { done = true; say("Confirmed. You're on the list."); }
       else say("This link has expired or was already used. Sign up again on the home page to get a new one.");
     } catch {
       say("Something went wrong. Please try again.");

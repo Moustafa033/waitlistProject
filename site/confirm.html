@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="robots" content="noindex, nofollow">
-  <title>Confirm your email — Brand AI</title>
+  <title>Confirm your email — Creating in Public</title>
   <link rel="preload" href="/assets/fonts/InterVariable.woff2" as="font" type="font/woff2" crossorigin>
   <link rel="stylesheet" href="/assets/app.css">
   <script src="/assets/config.js" defer></script>
@@ -23,14 +23,17 @@
       </a>
     </header>
 
-    <main class="panel">
-      <h1>One last step</h1>
+    <main class="hero short">
+      <div class="glow" aria-hidden="true"></div>
       <!-- Opening this page changes NOTHING. Email security scanners (Safe Links,
            Proofpoint, Mimecast...) open every link; only a person pressing the
            button confirms. The token is in the #fragment, so it never reaches a server log. -->
-      <p>Press the button to confirm that you want launch emails from Brand AI.</p>
+      <h1><span class="l1">One last step</span></h1>
+      <p class="sub">Confirm that's your email</p>
       <div id="wl-turnstile" class="ts"></div>
-      <button id="wl-confirm" type="button" disabled>Confirm my email</button>
+      <div class="actions">
+        <button id="wl-confirm" type="button" disabled>Confirm my email</button>
+      </div>
       <p id="wl-status" class="status" role="status" aria-live="polite"></p>
     </main>
 
