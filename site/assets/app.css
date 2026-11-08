@@ -29,6 +29,8 @@
   --u1: #ff8a3d;                            /* underline: warm (the room light) ... */
   --u2: #6b7bff;                            /* ... to cool */
   --u-glow: rgba(255, 138, 61, .28);
+  --streak: 17, 17, 17;                     /* background lines (lines.js): dark on the light page ... */
+  --streak-strength: .45;
   --danger: #d6382a;
   --danger-glow: rgba(214, 56, 42, .3);
   --frame: min(1120px, calc(100% - 32px));
@@ -51,6 +53,8 @@
     --u1: #ffa060;
     --u2: #8794ff;
     --u-glow: rgba(255, 150, 80, .35);
+    --streak: 255, 255, 255;                /* ... white on the dark page */
+    --streak-strength: 1;
   }
 }
 
@@ -68,6 +72,13 @@ a { color: inherit; text-underline-offset: 3px; }
 .sr-only {
   position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
   overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0;
+}
+
+/* background lines canvas (drawn by lines.js), behind everything */
+.bg-lines {
+  position: fixed; inset: 0; width: 100%; height: 100%;
+  z-index: -2; pointer-events: none;
+  animation: fade 2s ease .8s both;
 }
 
 /* ---------- page frame: two vertical rails + a line under the header and above the footer ---------- */

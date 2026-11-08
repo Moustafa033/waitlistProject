@@ -3,16 +3,21 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Creating in Public — join the waitlist</title>
-  <meta name="description" content="Every big idea starts in a room. Be part of it: join the Creating in Public waitlist.">
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml">
+  <link rel="icon" href="/favicon-32.png" type="image/png" sizes="32x32">
+  <link rel="apple-touch-icon" href="/apple-touch-icon.png">
+  <title>Creating in Public</title>
+  <meta name="description" content="I build apps that help people and use AI to make everyday life easier. Here I share everything I'm working on, openly, as I build it.">
   <link rel="preload" href="/assets/fonts/InterVariable.woff2" as="font" type="font/woff2" crossorigin>
   <link rel="stylesheet" href="/assets/app.css">
   <!-- No inline scripts, inline styles or inline event handlers: the CSP forbids them (that is the XSS defense). -->
   <script src="/assets/config.js" defer></script>
+  <script src="/assets/lines.js" defer></script>
   <script src="/assets/signup.js" defer></script>
   <script src="https://challenges.cloudflare.com/turnstile/v0/api.js?render=explicit" async defer></script>
 </head>
 <body>
+  <canvas id="bg-lines" class="bg-lines" aria-hidden="true"></canvas>
   <div class="page">
     <header class="bar top">
       <a class="brand" href="/">
@@ -27,11 +32,11 @@
     <main class="hero">
       <div class="glow" aria-hidden="true"></div>
       <p class="pill">Waitlist open</p>
-      <h1><span class="l1">Every big idea</span> <span class="l2">starts in a room</span></h1>
-      <p class="sub">Be part of it</p>
+      <h1><span class="l1">Every big idea</span> <span class="l2">starts in a glance</span></h1>
+      <p class="sub">Act on it</p>
 
       <!-- form-action 'none' in the CSP: without our script this form cannot be submitted at all -->
-      <form id="wl-form" class="signup" novalidate data-consent-version="waitlist-v3">
+      <form id="wl-form" class="signup" novalidate data-consent-version="waitlist-v4">
         <div class="row">
           <label for="wl-email" class="sr-only">Email</label>
           <input id="wl-email" name="email" type="email" autocomplete="email" inputmode="email" maxlength="254" placeholder="name@domain.com" required>
@@ -48,7 +53,7 @@
         <div class="checks">
           <label class="check"><input id="wl-consent" type="checkbox" required>
             <span><span class="main">Email me when it's published</span>
-              <span class="hint">Brand AI launch and occasional news. Unsubscribe or delete your data anytime. <a href="/privacy">Privacy notice</a></span></span></label>
+              <span class="hint">Launch news and occasional updates. Unsubscribe or delete your data anytime. <a href="/privacy">Privacy notice</a></span></span></label>
           <label class="check"><input id="wl-age" type="checkbox" required> <span class="main">I am 16 or older.</span></label>
         </div>
 

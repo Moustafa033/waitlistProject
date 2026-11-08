@@ -1,3 +1,4 @@
 # Keep LF everywhere: CRLF breaks bash scripts in CI and changes file hashes.
 * text=auto eol=lf
 *.woff2 binary
+*.png binary

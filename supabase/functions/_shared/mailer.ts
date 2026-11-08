@@ -65,7 +65,7 @@ export function launchMail(cfg: Config, to: string, signupId: string, unsubToken
   const page = `${cfg.siteOrigin}/unsubscribe#id=${encodeURIComponent(signupId)}&t=${encodeURIComponent(unsubToken)}`;
   return {
     to,
-    subject: "Brand AI is live",
+    subject: "We're live",
     text: `It's here. [launch text written by the owner]\n\nUnsubscribe: ${page}`,
     html: `<p>It's here. [launch text written by the owner]</p><p style="font-size:12px"><a href="${page}">Unsubscribe</a></p>`,
     headers: bulkHeaders(cfg, signupId, unsubToken),
