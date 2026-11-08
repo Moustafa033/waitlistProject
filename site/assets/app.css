@@ -1,19 +1,336 @@
-:root { color-scheme: light dark; --fg: #111; --bg: #f6f6f4; --card: #fff; --accent: #1f6feb; --muted: #666; }
-@media (prefers-color-scheme: dark) { :root { --fg: #eee; --bg: #111; --card: #1b1b1b; --muted: #aaa; } }
+/* Creating in Public — one stylesheet for every page. No inline CSS anywhere (the CSP forbids it).
+   Motion is CSS only (transform / opacity / filter) and is switched off for prefers-reduced-motion. */
+
+/* Inter (SIL Open Font License, see fonts/OFL.txt), self-hosted: no request ever goes to a font CDN. */
+@font-face {
+  font-family: "Inter";
+  src: url("fonts/InterVariable.woff2") format("woff2");
+  font-weight: 100 900;
+  font-style: normal;
+  font-display: swap;
+}
+
+:root {
+  color-scheme: light dark;
+  --bg: #f4f4f3;
+  --fg: #111111;
+  --muted: #6b6b6b;
+  --line: rgba(0, 0, 0, .08);
+  --field: #ffffff;
+  --card: #ffffff;
+  --pill: #ffffff;
+  --btn: #111111;
+  --btn-fg: #ffffff;
+  --ring: rgba(17, 17, 17, .14);
+  --shadow: 0 1px 2px rgba(0, 0, 0, .05), 0 6px 18px rgba(0, 0, 0, .05);
+  --glow-warm: rgba(255, 190, 130, .42);
+  --glow-cool: rgba(150, 180, 255, .26);
+  --live: #22a55a;
+  --u1: #ff8a3d;                            /* underline: warm (the room light) ... */
+  --u2: #6b7bff;                            /* ... to cool */
+  --u-glow: rgba(255, 138, 61, .28);
+  --danger: #d6382a;
+  --danger-glow: rgba(214, 56, 42, .3);
+  --frame: min(1120px, calc(100% - 32px));
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #0e0e0e;
+    --fg: #f2f2f2;
+    --muted: #a3a3a3;
+    --line: rgba(255, 255, 255, .09);
+    --field: #191919;
+    --card: #161616;
+    --pill: #1b1b1b;
+    --btn: #f2f2f2;
+    --btn-fg: #111111;
+    --ring: rgba(242, 242, 242, .2);
+    --shadow: 0 1px 2px rgba(0, 0, 0, .4), 0 6px 18px rgba(0, 0, 0, .35);
+    --glow-warm: rgba(255, 170, 100, .22);
+    --glow-cool: rgba(110, 140, 255, .18);
+    --u1: #ffa060;
+    --u2: #8794ff;
+    --u-glow: rgba(255, 150, 80, .35);
+  }
+}
+
 * { box-sizing: border-box; }
-body { margin: 0; font: 16px/1.5 system-ui, sans-serif; color: var(--fg); background: var(--bg); }
-.card { max-width: 480px; margin: 8vh auto 2rem; padding: 2rem; background: var(--card); border-radius: 12px; }
-h1 { margin-top: 0; }
-.lead { font-size: 1.15rem; }
-.small, footer { font-size: .85rem; color: var(--muted); }
-footer { text-align: center; }
-label { display: block; margin: .75rem 0 .25rem; }
-input[type=email] { width: 100%; padding: .7rem; font-size: 1rem; border: 1px solid #8884; border-radius: 8px; background: transparent; color: inherit; }
-.check { display: flex; gap: .5rem; align-items: flex-start; font-size: .95rem; }
-.check input { margin-top: .3rem; }
+html { -webkit-text-size-adjust: 100%; }
+body {
+  margin: 0;
+  font: 16px/1.5 "Inter", system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  font-feature-settings: "cv11" 1;          /* single-storey "a": a rounder, more geometric look */
+  color: var(--fg);
+  background: var(--bg);
+  -webkit-font-smoothing: antialiased;
+}
+a { color: inherit; text-underline-offset: 3px; }
+.sr-only {
+  position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
+  overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0;
+}
+
+/* ---------- page frame: two vertical rails + a line under the header and above the footer ---------- */
+.page {
+  position: relative;
+  min-height: 100vh;
+  min-height: 100svh;
+  display: grid;
+  grid-template-rows: auto 1fr auto;
+  overflow: hidden;
+}
+.page::before {                             /* the two vertical rails */
+  content: "";
+  position: absolute; top: 0; bottom: 0; left: 50%;
+  width: var(--frame);
+  transform: translateX(-50%);
+  border-left: 1px solid var(--line);
+  border-right: 1px solid var(--line);
+  pointer-events: none;
+  animation: rails 1.1s cubic-bezier(.2, .7, .2, 1) both;
+}
+.bar {
+  position: relative;
+  display: flex; align-items: center; justify-content: center; gap: .6rem;
+  padding: 1.25rem 1rem;
+}
+.bar::after {                               /* the horizontal line, drawn from the centre out */
+  content: "";
+  position: absolute; left: 0; right: 0; height: 1px;
+  background: var(--line);
+  animation: draw-x 1s cubic-bezier(.2, .7, .2, 1) .1s both;
+}
+.bar.top::after { bottom: 0; }
+.bar.bottom::after { top: 0; }
+
+.brand {
+  display: inline-flex; align-items: center; gap: .5rem;
+  font-weight: 650; font-size: 1.05rem; letter-spacing: -.02em;
+  text-decoration: none;
+  animation: rise .8s cubic-bezier(.2, .7, .2, 1) .15s both;
+}
+.mark { display: block; }
+.mark circle { transform-origin: 12px 12px; animation: lamp 4s ease-in-out 1.4s infinite; }
+
+.bar.bottom {
+  font-size: .8rem; color: var(--muted);
+  animation: fade .8s ease 1.1s both;
+}
+.bar.bottom a { color: var(--fg); text-decoration: none; }
+.bar.bottom a:hover { text-decoration: underline; }
+.dot { opacity: .6; }
+
+/* ---------- hero ---------- */
+.hero {
+  position: relative;
+  display: flex; flex-direction: column; align-items: center; justify-content: center;
+  text-align: center;
+  padding: 12vh 1.25rem 10vh;
+  isolation: isolate;                       /* keeps the glow (z-index -1) behind the text, inside the hero */
+}
+.glow {                                     /* "a light on in a room": two soft lights that slowly breathe */
+  position: absolute; left: 50%; top: 44%;
+  width: min(760px, 120vw); height: 460px;
+  transform: translate(-50%, -50%);
+  pointer-events: none; z-index: -1;
+}
+.glow::before, .glow::after {
+  content: ""; position: absolute; inset: 0; border-radius: 50%;
+  filter: blur(40px);
+}
+.glow::before {
+  background: radial-gradient(closest-side, var(--glow-warm), transparent);
+  animation: drift-a 14s ease-in-out infinite alternate, fade 2s ease .3s both;
+}
+.glow::after {
+  background: radial-gradient(closest-side, var(--glow-cool), transparent);
+  animation: drift-b 18s ease-in-out infinite alternate, fade 2.4s ease .6s both;
+}
+
+.pill {
+  display: inline-flex; align-items: center; gap: .45rem;
+  margin: 0 0 1.4rem;
+  padding: .32rem .8rem;
+  font-size: .68rem; font-weight: 600; letter-spacing: .08em; text-transform: uppercase;
+  background: var(--pill);
+  border-radius: 999px;
+  box-shadow: 0 0 0 1px var(--line), 0 2px 8px rgba(0, 0, 0, .05);
+  animation: rise .8s cubic-bezier(.2, .7, .2, 1) .3s both;
+}
+.pill::before {                             /* small "live" dot */
+  content: ""; width: 6px; height: 6px; border-radius: 50%;
+  background: var(--live);
+  box-shadow: 0 0 0 0 var(--live);
+  animation: ping 2.4s ease-out 1.5s infinite;
+}
+
+h1 {
+  margin: 0;
+  font-size: clamp(2.3rem, 6.4vw, 4.4rem);
+  font-weight: 700;
+  line-height: 1.04;
+  letter-spacing: -.045em;
+}
+h1 span { display: block; }
+h1 .l1 { animation: reveal 1s cubic-bezier(.2, .7, .2, 1) .45s both; }
+h1 .l2 { animation: reveal 1s cubic-bezier(.2, .7, .2, 1) .62s both; }
+
+.sub {
+  position: relative;
+  display: inline-block;
+  margin: 1rem 0 2.4rem;
+  padding-bottom: .55rem;
+  font-size: clamp(1.05rem, 2vw, 1.2rem);
+  font-weight: 500;
+  color: var(--fg);
+  letter-spacing: -.01em;
+  animation: rise .9s cubic-bezier(.2, .7, .2, 1) .85s both;
+}
+.sub::after {                               /* modern underline: gradient stroke that draws in, then a light sweeps along it */
+  content: "";
+  position: absolute; left: -2px; right: -2px; bottom: 0;
+  height: 3px; border-radius: 3px;
+  background:
+    linear-gradient(110deg, transparent 35%, rgba(255, 255, 255, .9) 50%, transparent 65%) 200% 0 / 250% 100% no-repeat,
+    linear-gradient(90deg, var(--u1), var(--u2));
+  box-shadow: 0 2px 12px var(--u-glow);
+  transform-origin: left center;
+  animation: draw-x .9s cubic-bezier(.2, .7, .2, 1) 1.25s both, glint 4s ease-in-out 2.4s infinite;
+}
+
+/* ---------- signup form ---------- */
+.signup {
+  width: 100%; max-width: 440px;
+  animation: rise .9s cubic-bezier(.2, .7, .2, 1) 1s both;
+}
+.row { display: flex; gap: .5rem; }
+input[type=email] {
+  flex: 1; min-width: 0;
+  height: 46px; padding: 0 1.1rem;
+  font: inherit; font-size: .95rem;
+  color: var(--fg);
+  background: var(--field);
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  box-shadow: var(--shadow);
+  transition: border-color .2s, box-shadow .2s;
+}
+input[type=email]::placeholder { color: var(--muted); opacity: .8; }
+input[type=email]:focus { outline: none; border-color: var(--fg); box-shadow: 0 0 0 4px var(--ring), var(--shadow); }
+
+button {
+  height: 46px; padding: 0 1.35rem;
+  font: inherit; font-size: .92rem; font-weight: 600; letter-spacing: -.01em;
+  color: var(--btn-fg);
+  background: var(--btn);
+  border: 0; border-radius: 999px;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, .14), 0 6px 16px rgba(0, 0, 0, .16);
+  cursor: pointer;
+  white-space: nowrap;
+  transition: transform .2s cubic-bezier(.2, .7, .2, 1), box-shadow .2s, opacity .2s;
+}
+button:hover:not(:disabled) { transform: translateY(-2px); box-shadow: inset 0 1px 0 rgba(255, 255, 255, .14), 0 10px 22px rgba(0, 0, 0, .2); }
+button:active:not(:disabled) { transform: translateY(0); }
+button:focus-visible { outline: 2px solid var(--fg); outline-offset: 3px; }
+button:disabled { opacity: .45; cursor: not-allowed; }
+
+.checks { margin-top: 1.1rem; text-align: left; }
+.check {
+  display: flex; gap: .6rem; align-items: flex-start;
+  margin: .55rem 0 0;
+  font-size: .8rem; line-height: 1.45; color: var(--muted);
+  cursor: pointer;
+}
+.check input { flex: none; width: 16px; height: 16px; margin: .1rem 0 0; accent-color: var(--fg); cursor: pointer; }
+.check a { color: var(--fg); }
+.check .main { display: block; font-size: .88rem; font-weight: 500; color: var(--fg); }
+.check .hint { display: block; margin-top: .1rem; font-size: .76rem; }
+
 .hp { position: absolute; left: -10000px; width: 1px; height: 1px; overflow: hidden; }
-.ts { margin: 1rem 0; min-height: 65px; }
-button { width: 100%; padding: .8rem; font-size: 1rem; border: 0; border-radius: 8px; background: var(--accent); color: #fff; cursor: pointer; }
-button:disabled { opacity: .5; cursor: not-allowed; }
-.status { min-height: 1.5em; }
-.prose h2 { font-size: 1.05rem; margin-top: 1.5rem; }
+.ts { display: flex; justify-content: center; margin-top: .75rem; }   /* empty unless Cloudflare needs a click */
+.status { min-height: 1.5em; margin: .75rem 0 0; font-size: .9rem; }
+
+/* ---------- unsubscribe page ("Sure you want to leave?") ---------- */
+.leave h1 { font-size: clamp(2rem, 5.2vw, 3.6rem); }
+.actions {
+  display: flex; flex-wrap: wrap; justify-content: center; gap: .6rem;
+  margin-top: 2.2rem;
+  animation: rise .9s cubic-bezier(.2, .7, .2, 1) .85s both;
+}
+button.ghost {
+  color: var(--fg);
+  background: var(--field);
+  box-shadow: 0 0 0 1px var(--line), var(--shadow);
+}
+button.ghost:hover:not(:disabled) { box-shadow: 0 0 0 1px var(--fg), var(--shadow); }
+button.ghost.armed { color: #ffffff; background: var(--danger); box-shadow: 0 6px 16px var(--danger-glow); }
+.note {
+  max-width: 400px; margin: 1.4rem 0 0;
+  font-size: .8rem; line-height: 1.5; color: var(--muted);
+  animation: fade .9s ease 1.1s both;
+}
+.note a { color: var(--fg); }
+
+/* goodbye card: the page behind it blurs, the light in the mark dims ("leaving the room") */
+dialog.bye {
+  width: min(360px, calc(100% - 32px));
+  padding: 0; border: 0; border-radius: 22px;
+  color: var(--fg); background: var(--card);
+  box-shadow: 0 0 0 1px var(--line), 0 24px 60px rgba(0, 0, 0, .2);
+  text-align: center;
+}
+dialog.bye[open] { animation: pop .5s cubic-bezier(.2, .7, .2, 1) both; }
+dialog.bye::backdrop {
+  background: rgba(10, 10, 10, .18);
+  -webkit-backdrop-filter: blur(8px);
+  backdrop-filter: blur(8px);
+  animation: fade .4s ease both;
+}
+.bye-in { display: flex; flex-direction: column; align-items: center; gap: .35rem; padding: 2rem 1.75rem 1.8rem; }
+.bye h2 { margin: .7rem 0 0; font-size: 1.35rem; font-weight: 700; letter-spacing: -.03em; text-wrap: balance; }
+.bye p { margin: 0; font-size: .88rem; color: var(--muted); }
+.bye .mark circle { animation: lamp-off 1.8s ease .5s both; }
+
+/* ---------- inner pages: confirm / privacy / 404 ---------- */
+.panel {
+  width: min(560px, calc(100% - 32px));
+  margin: 9vh auto;
+  padding: 2rem;
+  background: var(--card);
+  border-radius: 20px;
+  box-shadow: 0 0 0 1px var(--line), var(--shadow);
+  animation: rise .8s cubic-bezier(.2, .7, .2, 1) .2s both;
+}
+.panel h1 { font-size: clamp(1.7rem, 4vw, 2.2rem); letter-spacing: -.035em; margin-bottom: .75rem; }
+.panel button { width: 100%; margin: .5rem 0; }
+.panel .ts { margin: .5rem 0; }
+.prose { width: min(760px, calc(100% - 32px)); }
+.prose h2 { font-size: 1.05rem; margin-top: 1.75rem; letter-spacing: -.01em; }
+.prose li { margin: .3rem 0; }
+.small { font-size: .85rem; color: var(--muted); }
+
+/* ---------- phones ---------- */
+@media (max-width: 520px) {
+  .row, .actions { flex-direction: column; width: 100%; }
+  button { width: 100%; }
+  .hero { padding-top: 8vh; }
+  .panel { padding: 1.5rem; }
+}
+
+/* ---------- motion ---------- */
+@keyframes rails  { from { opacity: 0; transform: translateX(-50%) scaleY(.6); } to { opacity: 1; transform: translateX(-50%) scaleY(1); } }
+@keyframes draw-x { from { transform: scaleX(0); } to { transform: scaleX(1); } }
+@keyframes fade   { from { opacity: 0; } to { opacity: 1; } }
+@keyframes rise   { from { opacity: 0; transform: translateY(14px); } to { opacity: 1; transform: none; } }
+@keyframes reveal { from { opacity: 0; transform: translateY(28px); filter: blur(10px); } to { opacity: 1; transform: none; filter: none; } }
+@keyframes drift-a { from { transform: translate(-6%, -4%) scale(.92); } to { transform: translate(7%, 5%) scale(1.08); } }
+@keyframes drift-b { from { transform: translate(8%, 6%) scale(1.05); } to { transform: translate(-7%, -5%) scale(.9); } }
+@keyframes lamp   { 0%, 100% { transform: scale(1); } 50% { transform: scale(.72); } }
+@keyframes glint  { 0% { background-position: 200% 0, 0 0; } 55%, 100% { background-position: -100% 0, 0 0; } }
+@keyframes pop      { from { opacity: 0; transform: translateY(10px) scale(.96); } to { opacity: 1; transform: none; } }
+@keyframes lamp-off { from { opacity: 1; transform: scale(1); } to { opacity: .15; transform: scale(.8); } }
+@keyframes ping { 0% { box-shadow: 0 0 0 0 var(--live); } 70%, 100% { box-shadow: 0 0 0 7px transparent; } }
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after, ::backdrop { animation: none !important; transition: none !important; }
+}

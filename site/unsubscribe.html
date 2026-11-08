@@ -4,21 +4,51 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="robots" content="noindex, nofollow">
-  <title>Unsubscribe — Brand AI</title>
+  <title>Unsubscribe — Creating in Public</title>
+  <link rel="preload" href="/assets/fonts/InterVariable.woff2" as="font" type="font/woff2" crossorigin>
   <link rel="stylesheet" href="/assets/app.css">
   <script src="/assets/config.js" defer></script>
   <script src="/assets/unsubscribe.js" defer></script>
 </head>
 <body>
-  <main class="card">
-    <h1>Unsubscribe</h1>
-    <p>Press a button below. No login needed.</p>
-    <p><b>Unsubscribe:</b> we stop emailing you. You can join again later.</p>
-    <button id="wl-unsub" type="button">Unsubscribe</button>
-    <p><b>Delete my data:</b> your email address is removed from our list immediately. We keep only a
-      one-way fingerprint of it so that we never email you again.</p>
-    <button id="wl-erase" type="button">Delete my data</button>
-    <p id="wl-status" class="status" role="status" aria-live="polite"></p>
-  </main>
+  <div class="page">
+    <header class="bar top">
+      <a class="brand" href="/">
+        <svg class="mark" viewBox="0 0 24 24" width="22" height="22" aria-hidden="true" focusable="false">
+          <rect x="2.5" y="2.5" width="19" height="19" rx="6" fill="none" stroke="currentColor" stroke-width="2.2"/>
+          <circle cx="12" cy="12" r="4" fill="currentColor"/>
+        </svg>
+        <span>Creating in Public</span>
+      </a>
+    </header>
+
+    <main class="hero leave">
+      <div class="glow" aria-hidden="true"></div>
+      <h1><span class="l1">Sure you want to leave?</span></h1>
+      <!-- Nothing happens on page load: only a person's click acts (link scanners open every link). -->
+      <div class="actions">
+        <button id="wl-unsub" type="button">Unsubscribe</button>
+        <button id="wl-erase" type="button" class="ghost">Delete my data</button>
+      </div>
+      <p class="note">Unsubscribe stops our emails. Delete removes your email from our list for good. <a href="/privacy">Privacy notice</a></p>
+      <p id="wl-status" class="status" role="status" aria-live="polite"></p>
+    </main>
+
+    <!-- shown only after a successful unsubscribe / delete (unsubscribe.js) -->
+    <dialog id="wl-bye" class="bye" aria-labelledby="wl-bye-title">
+      <div class="bye-in">
+        <svg class="mark" viewBox="0 0 24 24" width="34" height="34" aria-hidden="true" focusable="false">
+          <rect x="2.5" y="2.5" width="19" height="19" rx="6" fill="none" stroke="currentColor" stroke-width="2.2"/>
+          <circle cx="12" cy="12" r="4" fill="currentColor"/>
+        </svg>
+        <h2 id="wl-bye-title">It's sad to see you leaving</h2>
+        <p>Until next time</p>
+      </div>
+    </dialog>
+
+    <footer class="bar bottom">
+      <span>© 2026 Creating in Public</span><span class="dot" aria-hidden="true">•</span><a href="/privacy">Privacy</a>
+    </footer>
+  </div>
 </body>
 </html>

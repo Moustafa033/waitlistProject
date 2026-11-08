@@ -5,6 +5,10 @@
   const eraseBtn = document.getElementById("wl-erase");
   const status = document.getElementById("wl-status");
   const say = (m) => { status.textContent = m; };   // textContent only: no HTML is ever parsed
+  const bye = document.getElementById("wl-bye");
+  // Goodbye card, only after the server confirmed. Esc or a click outside the card closes it.
+  const farewell = () => { if (bye && typeof bye.showModal === "function" && !bye.open) bye.showModal(); };
+  if (bye) bye.addEventListener("click", (e) => { if (e.target === bye) bye.close(); });
   const p = new URLSearchParams(location.hash.slice(1));
   const id = p.get("id"), t = p.get("t");
   history.replaceState(null, "", location.pathname);   // remove the signed link from the address bar
@@ -25,7 +29,7 @@
   unsubBtn.addEventListener("click", async () => {
     setDisabled(true); say("Working…");
     try {
-      if (await post("/unsubscribe")) say("Done. You will not receive any more emails from us.");
+      if (await post("/unsubscribe")) { say("Done. You will not receive any more emails from us."); farewell(); }
       else { say("This link is not valid. Use the link in our latest email."); setDisabled(false); }
     } catch { say("Something went wrong. Please try again."); setDisabled(false); }
   });
@@ -35,13 +39,14 @@
   eraseBtn.addEventListener("click", async () => {
     if (!armed) {
       armed = true;
-      eraseBtn.textContent = "Yes, delete my data permanently";
+      eraseBtn.classList.add("armed");
+      eraseBtn.textContent = "Yes, delete permanently";
       say("Press the button again to confirm. This cannot be undone.");
       return;
     }
     setDisabled(true); say("Deleting…");
     try {
-      if (await post("/erase")) say("Done. Your data has been deleted and we will never email you again.");
+      if (await post("/erase")) { say("Done. Your data has been deleted and we will never email you again."); farewell(); }
       else { say("This link is not valid. Use the link in our latest email."); setDisabled(false); }
     } catch { say("Something went wrong. Please try again."); setDisabled(false); }
   });

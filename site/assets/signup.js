@@ -30,6 +30,7 @@
       widgetId = window.turnstile.render("#wl-turnstile", {
         sitekey: cfg.turnstileSiteKey,
         action: "waitlist_signup",           // the server checks this exact value
+        appearance: "interaction-only",      // box shows only if Cloudflare needs a click; the token is still verified server-side
         callback: (t) => { tsToken = t; refresh(); },
         "expired-callback": () => { tsToken = null; refresh(); },
         "error-callback": () => { tsToken = null; refresh(); },

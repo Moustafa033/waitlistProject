@@ -20,6 +20,7 @@
       window.turnstile.render("#wl-turnstile", {
         sitekey: cfg.turnstileSiteKey,
         action: "waitlist_confirm",
+        appearance: "interaction-only",   // box shows only if Cloudflare needs a click; the token is still verified server-side
         callback: (t) => { tsToken = t; btn.disabled = done; },
         "expired-callback": () => { tsToken = null; btn.disabled = true; },
       });

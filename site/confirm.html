@@ -5,21 +5,38 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="robots" content="noindex, nofollow">
   <title>Confirm your email — Brand AI</title>
+  <link rel="preload" href="/assets/fonts/InterVariable.woff2" as="font" type="font/woff2" crossorigin>
   <link rel="stylesheet" href="/assets/app.css">
   <script src="/assets/config.js" defer></script>
   <script src="/assets/confirm.js" defer></script>
   <script src="https://challenges.cloudflare.com/turnstile/v0/api.js?render=explicit" async defer></script>
 </head>
 <body>
-  <main class="card">
-    <h1>One last step</h1>
-    <!-- Opening this page changes NOTHING. Email security scanners (Safe Links,
-         Proofpoint, Mimecast...) open every link; only a person pressing the
-         button confirms. The token is in the #fragment, so it never reaches a server log. -->
-    <p>Press the button to confirm that you want launch emails from Brand AI.</p>
-    <div id="wl-turnstile" class="ts"></div>
-    <button id="wl-confirm" type="button" disabled>Confirm my email</button>
-    <p id="wl-status" class="status" role="status" aria-live="polite"></p>
-  </main>
+  <div class="page">
+    <header class="bar top">
+      <a class="brand" href="/">
+        <svg class="mark" viewBox="0 0 24 24" width="22" height="22" aria-hidden="true" focusable="false">
+          <rect x="2.5" y="2.5" width="19" height="19" rx="6" fill="none" stroke="currentColor" stroke-width="2.2"/>
+          <circle cx="12" cy="12" r="4" fill="currentColor"/>
+        </svg>
+        <span>Creating in Public</span>
+      </a>
+    </header>
+
+    <main class="panel">
+      <h1>One last step</h1>
+      <!-- Opening this page changes NOTHING. Email security scanners (Safe Links,
+           Proofpoint, Mimecast...) open every link; only a person pressing the
+           button confirms. The token is in the #fragment, so it never reaches a server log. -->
+      <p>Press the button to confirm that you want launch emails from Brand AI.</p>
+      <div id="wl-turnstile" class="ts"></div>
+      <button id="wl-confirm" type="button" disabled>Confirm my email</button>
+      <p id="wl-status" class="status" role="status" aria-live="polite"></p>
+    </main>
+
+    <footer class="bar bottom">
+      <span>© 2026 Creating in Public</span><span class="dot" aria-hidden="true">•</span><a href="/privacy">Privacy</a>
+    </footer>
+  </div>
 </body>
 </html>
