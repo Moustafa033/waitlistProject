@@ -119,7 +119,7 @@ const ALERT_TEXT: Record<string, string> = {
   paused_signups: "Sending is paused and people are signing up (they are queued)",
   auto_paused: "SENDING WAS PAUSED AUTOMATICALLY: bounce or spam-complaint spike",
 };
-export async function alertMail(cfg: Config, to: string, alerts: Alert[], queued: number, paused: boolean): Promise<Mail> {
+export async function alertMail(_cfg: Config, to: string, alerts: Alert[], queued: number, paused: boolean): Promise<Mail> {
   const known = alerts.filter((a) => a.kind in ALERT_TEXT);
   const urgent = known.some((a) => a.kind === "auto_paused");
   const lines = known.map((a) => `- ${ALERT_TEXT[a.kind]}: ${Number(a.hits) | 0} time(s), ${String(a.first_at).slice(0, 16)} to ${String(a.last_at).slice(0, 16)} UTC`);
