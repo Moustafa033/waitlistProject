@@ -146,6 +146,17 @@ practice the global caps in the DB are the real protection.
 - `email.complained` → suppress. `email.bounced` → suppress only if permanent/hard (soft bounces are
   retried by the provider). Check the provider's current payload fields before go-live.
 
+### 3.6 `POST /drain` — scheduled job only (migration 0005)
+- Called every ~10 min by pg_cron + pg_net (setup in §11). Auth: header `x-cron-key` compared in
+  constant time with the `CRON_SECRET` function secret (32+ chars, letters/digits/`-`/`_`).
+  Missing secret, missing key or wrong key → **404, same as an unknown route** (invisible to scanners).
+  No Origin, no CORS: no browser ever calls it.
+- Runs `waitlist_drain_queue()` (same limits as a live signup, batch of `drain_batch`), sends each
+  confirmation, gives units back if the provider is not reached and **stops trying the rest of the
+  batch** after the first "not reached" (the run stays short).
+- Then `waitlist_take_alerts()` and, if `ALERT_TO` is set, one email to the owner. The alert email
+  is built only from fixed alert names and numbers: **never a visitor's address**.
+
 ## 4. Data model and rules
 
 ### 4.1 Tables (all in `private`, RLS enabled **and forced**, no policies, no grants)
@@ -159,6 +170,9 @@ practice the global caps in the DB are the real protection.
 - `counters` — atomic `INSERT … ON CONFLICT DO UPDATE … WHERE used < cap` (single statement, no
   read-then-write race). Buckets: `send_hour` (global confirmation emails per hour), `new_day` (new
   rows per day).
+- `send_queue` (0005) — signup id + time only (no copy of the address), cascade-deleted with the
+  signup, bounded by `queue_max`, entries older than `queue_ttl_hours` dropped.
+- `alerts` (0005) — one row per alert kind per window (hits counted), counts only, kept 30 days.
 - `settings`, `app_secrets` (only HMAC keys: `email_pepper`, `unsub_key` — never API keys).
 
 Even `service_role` has **no direct table access**: everything goes through the RPCs, so every rule
@@ -175,6 +189,9 @@ dot, domain labels `a-z0-9-` (no leading/trailing hyphen), letters-only TLD, tot
 character (CR, LF, TAB, NUL), zero-width or bidi character → **refuse, never clean**. Non-ASCII
 domains are refused (homographs). This blocks header injection, CSV formulas and look-alike domains.
 It refuses a few exotic-but-valid addresses; that is accepted on purpose.
+Also refused: MIME **encoded-word** local parts (`=?charset?enc?…?=`, migration 0004 + validate.ts).
+Some mail software decodes these and re-targets delivery (PortSwigger, "Splitting the email atom"),
+so a `=?` in the local part is rejected by both the Edge Function and `private.email_ok`.
 
 Optional, not in the reference: an MX lookup. If added, do it with a short timeout and treat a
 lookup failure as "allow" (DNS hiccups must not lose real people) — it only removes typo domains.
@@ -185,11 +202,42 @@ Attackers submit a victim's address into thousands of forms to bury a real alert
   (example 3) that is never reset — not by re-signup, not by unsubscribe.
 - global: confirmation emails per hour (example 500) **and per day** (example 90, migration 0002 —
   must stay below the email plan's daily limit, e.g. Resend free = 100/day), new rows per day (example 5000).
+- per **mailbox** (migration 0004): all `+tag` variants of one inbox share a cap
+  (`mailbox_sends_per_day`, example 3). Identity stays the EXACT address (every variant is still its
+  own person / its own row), but the SEND throttle is keyed by the real delivery mailbox:
+  `local` with the `+tag` stripped, `googlemail.com` folded to `gmail.com`, **dots left alone** (owner
+  choice — dots are a smaller vector and the global daily cap still bounds them; folding Gmail dots is
+  a future flag). The key is HMAC-hashed before it touches `private.counters`, so no plaintext address
+  is stored. This never merges two different-letter addresses (`ahmedmohamed@` ≠ `ahmedsayed@`).
 - Turnstile on signup, identical answers, nothing user-controlled in the email.
-Result: our site can send any one address at most 3 emails while its row exists (tested, including 50
-parallel submits of one address → exactly 1 email). Note: the 30-day deletion of never-confirmed rows
-also resets that address's counter, so the true ceiling is 3 emails per 30 days — accepted trade-off
-for data minimization.
+Result: one inbox gets at most `mailbox_sends_per_day` confirmation emails regardless of how many
+`+tag` or exact-address variants are tried (tested: 5 `+tag` variants → 3 emails; 50 parallel submits
+of one address → 1 email). Before 0004 the per-address cap could be multiplied by using `victim+1@`,
+`victim+2@`… — each counted as a different person. Note: the 30-day deletion of never-confirmed rows
+resets counters, so the true ceiling is per-mailbox-per-~30-days — accepted trade-off for data minimization.
+
+### 4.3b Send-cap safety net (migration 0005)
+The caps in §4.3 protect the domain, but on their own they **silently drop real people** when a
+burst (a post going viral, or a bot) fills the hourly/daily cap. 0005 adds:
+- **Queue, not drop.** A *pending* person refused only by a **global** cap is queued; the scheduled
+  drain sends them when room frees up, through exactly the same caps. Per-address and per-mailbox
+  refusals are **never** queued (the queue must not become a way around them). Re-signing up while
+  queued does not add a second entry, and nobody gets two emails (tested under 10 parallel drains +
+  30 parallel re-signups).
+- **Kill switch.** `select public.waitlist_set_paused(true);` stops every confirmation email at once.
+  Signups are still recorded and queued; `waitlist_set_paused(false)` resumes and the next drain
+  sends the queue. Resuming is always a human decision.
+- **Auto-pause.** After each new hard bounce or complaint, the last 24 h are checked: pause when
+  complaints ≥ `complaint_pause_min` (example 2), or hard bounces ≥ `bounce_pause_min` (example 5)
+  **and** ≥ `bounce_pause_pct` (example 5%) of the last 24 h of sends. A repeated webhook for the
+  same address counts once. Trade-off (owner-accepted): someone feeding fake addresses can pause our
+  emails — that only *delays* real people (they wait in the queue) and the owner is alerted; a burned
+  sending domain takes weeks to recover.
+- **Owner alerts.** First hit per window of: hourly cap, daily cap, new-signup cap, queue full,
+  signups while paused, auto-pause → one `alerts` row; the drain emails a summary to `ALERT_TO`.
+- **Lock rule (for any future change).** Once the drain holds the global hour/day counters it must
+  never *wait* on a per-person lock (signup row, mailbox counter) — it only tries them and skips a
+  busy person. Waiting there deadlocks with a live signup (proven by race test #4 before the fix).
 
 ### 4.4 Lifecycle and retention (examples)
 - pending, never confirmed → deleted 30 days after the **last confirmation email** (not after
@@ -231,6 +279,38 @@ for data minimization.
   already reject it).
 - HSTS is set without `preload`. Add `preload` only when every subdomain is HTTPS-only forever.
 
+## 6b. Hosting (Hostinger) and the live site
+The code can be perfect and still leak if the hosting is weak or a file is uploaded wrong. Hostinger
+was hardened by the owner (Nov 2026). These are the rules that keep it that way:
+- H-1 (MUST) 2FA on the Hostinger account. Hosting, domain and email sit behind that one login.
+- H-2 (MUST) Force HTTPS on (hPanel → Security → SSL). HSTS is in `.htaccess`.
+- H-3 (MUST) **Upload the `.htaccess` with every release.** It carries all security headers, blocks
+  hidden files and sends `www` to the one real address (the backend accepts only `SITE_ORIGIN`).
+  The site without it still "works" but has no protection: always run `ci/check-live-site.sh` after upload.
+- H-4 (MUST) Malware Scanner (Websites → Manage → Security → Malware Scanner) shows clean. It runs by
+  itself. If it ever finds something: do **not** clean files one by one. Replace everything in
+  `public_html` with the files from the repo (`site/` + `.htaccess`), change the Hostinger password,
+  then rotate the keys in `docs/KEYS.md` (§7b).
+- H-5 (MUST) Only the site's files live on Hostinger: no database, no secrets, no WordPress, no test
+  sites, no unused FTP accounts. File access by SFTP only. The repo is the master copy; Hostinger's
+  backups are a convenience, not the backup.
+- H-6 (MUST) Domain: registrar transfer lock on, WHOIS privacy on (also §6).
+- H-7 (MUST) Mailboxes on the domain (e.g. `security@`) have their own strong password: whoever
+  controls a mailbox can reset other accounts.
+
+**Live check after every upload or deploy** (the code tests cannot see the live server):
+- `bash ci/check-live-site.sh` must pass. It is read-only: it never signs anyone up or sends
+  an email. It checks:
+  - the CSP is identical to the repo, and every security header is present;
+  - http→https and www→apex redirects;
+  - hidden files return 403/404, and `security.txt` is published;
+  - the function refuses junk (no Origin, another site, extra fields, injection text, a huge body,
+    the wrong content type, `/drain` with a wrong key) and CORS never allows another site.
+- By hand:
+  - securityheaders.com grade **A+**;
+  - Supabase **Advisors → Security Advisor: 0 errors** (read every warning before changing anything);
+  - hPanel Malware Scanner clean.
+
 ## 7. Keys and secrets
 
 | Secret | Where | Who may see it |
@@ -239,12 +319,57 @@ for data minimization.
 | `RESEND_API_KEY` (sending-only) | `supabase secrets set` | owner only |
 | `TURNSTILE_SECRET` | `supabase secrets set` | owner only |
 | `RESEND_WEBHOOK_SECRET` (whsec_) | `supabase secrets set` | owner only |
+| `CRON_SECRET` (0005, 32+ random chars) | `supabase secrets set` **and** Vault (`waitlist_cron_key`) | owner only |
 | `email_pepper`, `unsub_key` | `private.app_secrets` (insert via SQL editor) | owner only |
 | Turnstile **site** key, function URL | `site/assets/config.js` | public (fine) |
 
 Never paste any secret into an AI chat, an issue, a commit or a screenshot. Legacy `anon`/`service_role`
 JWT keys are refused by the code. Rotating `unsub_key` invalidates every unsubscribe link already sent —
 only do it with a new launch email ready.
+
+## 7b. Your computer, your keys, your connections (2026 breach lessons)
+The 2026 breaches that hurt small projects the most came in through the owner's side, not the code:
+- infostealer malware copied live dashboard sessions from a developer's computer;
+- a credential forgotten for years still worked;
+- an AI agent in CI obeyed instructions hidden in a GitHub issue title.
+
+The same rules as the gym guide (DEV-1…6), applied to this project:
+- **Computer (DEV-1).**
+  - Use a separate browser profile only for Supabase, Resend, Cloudflare, Hostinger, the registrar
+    and GitHub, and sign out when done.
+  - No cracked software or unknown extensions.
+  - Suspected malware: from a clean device, sign out of all sessions everywhere, then rotate
+    everything in the inventory below.
+- **Inventory (DEV-2)** in `docs/KEYS.md`: names and places only, **never values**. For this project:
+  - `RESEND_API_KEY`, `RESEND_WEBHOOK_SECRET`, `TURNSTILE_SECRET`, `CRON_SECRET` (+ its Vault copy);
+  - `email_pepper`, `unsub_key`;
+  - Supabase access tokens (CLI);
+  - GitHub tokens and connected OAuth apps;
+  - Hostinger and registrar logins, Cloudflare API tokens.
+
+  Revoke anything unused for 90 days. Rotate when a tool or person stops using it.
+- **AI agents on the repo (DEV-3).**
+  - No CI job lets an agent read issue/PR/comment text while holding a write token or a secret.
+  - No `pull_request_target` + checkout of PR code.
+  - Making the repo private does not remove this rule: collaborators and bots still write issues.
+- **No packages (slopsquatting).** The site and the functions import **nothing** from npm, jsr or a URL.
+  Keep it that way: a new import needs the owner, and must never be a name an AI remembered.
+  `.npmrc` (`ignore-scripts`, `min-release-age=3`) guards any test tool that is ever approved.
+- **Unused Supabase features are switched off.** This project has no user accounts and no live updates:
+  - Auth → **turn off "Allow new users to sign up"** (and every provider). The waitlist never uses
+    Auth, so an open signup endpoint is only attack surface.
+  - Realtime → **turn off "Allow public access"**, and keep every table out of the `supabase_realtime`
+    publication. All tables are in `private` anyway.
+  - Storage → no buckets.
+- **Redirects.** The confirmation and unsubscribe links are built only from `SITE_ORIGIN` (exact,
+  validated) and a random token. There is no "return to" parameter anywhere; never add one
+  (open redirect = phishing that looks like us).
+- **Backups (DEV-6).**
+  - Check which backups your Supabase plan includes. Free projects may have none you can restore.
+  - Before launch, export the confirmed list (`waitlist_export_confirmed()`) to an encrypted place,
+    not a plain file on the laptop.
+  - After any restore, re-run erasures made since the backup time. `suppressions` keeps their hashes,
+    so they are never emailed again, but their rows must be deleted again.
 
 ## 8. Privacy (GDPR) — what the code does and what the owner must do
 
@@ -264,7 +389,9 @@ whenever the consent text changes.
 | W1 | Read/export the list with the browser key | no key in the site; anon/authenticated execute nothing; schema private closed | test_01 |
 | W2 | Call RPCs directly / read tables with service_role | service_role has no table grants; RPCs only | test_01 |
 | W3 | Email enumeration ("is X on the list?") | identical 202 for every case; rounded counter | Deno "byte-identical" |
-| W4 | Subscription bombing a victim | per-address gap + lifetime cap, global caps, Turnstile | test_02, test_04, race 1 |
+| W4 | Subscription bombing a victim | per-address gap + lifetime cap, **per-mailbox cap (0004)**, global hour/day caps, Turnstile | test_02, test_04, test_05, race 1 |
+| W4b | `+tag` variants multiply the per-address cap (`victim+1@`, `victim+2@`…) | per-mailbox cap folds `+tag` to one inbox (0004) | test_05 |
+| W4c | Encoded-word address re-targets delivery (`=?…?=@…`) | refused by validate.ts + `private.email_ok` (0004) | test_05 |
 | W5 | Bot farm filling the table / burning sender reputation | Turnstile (hostname+action), honeypot, time trap, disposable list, global caps | Deno refusals, test_04, race 2 |
 | W6 | Turnstile token from another site/widget, or replayed | hostname + action check, single verify per token | Deno refusals, confirm test |
 | W7 | Turnstile outage used as a bypass | fail closed (503) | Deno |
@@ -295,6 +422,13 @@ whenever the consent text changes.
 | W32 | Privacy leaks in logs | logs carry only function, status, reason code; raw paths never logged | check-functions.sh |
 | W33 | Timing side channel ("new address" answers slower because an email is sent) | email sent in the background after the response | Deno latency test |
 | W34 | Flood of `GET /count` turning into DB load | 60 s per-instance cache, rounded value | Deno cache test |
+| W36 | Burst fills the global cap → real people silently get no email | queue + scheduled drain (0005), owner alert | test_06, race 4 |
+| W37 | Bot feeds fake/non-existent addresses → hard-bounce spike burns the sending domain | auto-pause on bounce/complaint spike, owner alert, queue keeps real people | test_06 |
+| W38 | Scheduler endpoint abused (force sends, read alerts) | secret header, constant-time compare, 404 when wrong or unset, same caps as live | Deno drain, test_06 |
+| W39 | Infostealer copies the owner's live dashboard session | admin-only browser profile, sign out everywhere from a clean device, rotate from the inventory | §7b (owner) |
+| W40 | Forgotten old key / OAuth app still has access | `docs/KEYS.md` inventory, 90-day unused revoke | §7b (owner) |
+| W41 | Prompt injection through an issue title into a CI agent | no agent job with write token + untrusted text | §7b |
+| W42 | Supabase Auth signup left open on a project that needs no accounts | Auth signup off, Realtime public access off, no buckets | §7b checklist |
 | W35 | Catch-all domain farm (one domain, thousands of "real" confirmed addresses) | Turnstile + global caps limit the speed; **owner option:** per-domain daily cap for non-major domains (not by IP) | — (not built) |
 
 ## 10. Deliberately NOT done (do not add without the owner)
@@ -321,7 +455,25 @@ changes `bash e2e/run.sh` — all green. New behavior = new test.
 - [ ] Separate Supabase project, region chosen, spend cap ON, smallest compute.
 - [ ] Migration applied; `email_pepper` and `unsub_key` inserted (32+ random chars each, different).
 - [ ] pg_cron daily: `select public.waitlist_maintenance();`
+- [ ] Safety net (0005): set function secrets `CRON_SECRET` (`openssl rand -hex 32`) and `ALERT_TO`
+      (your real inbox), store the same key in Vault and schedule the drain every 10 min:
+      ```sql
+      select vault.create_secret('<the CRON_SECRET value>', 'waitlist_cron_key');
+      select cron.schedule('waitlist-drain', '*/10 * * * *', $$
+        select net.http_post(
+          url     := 'https://<project-ref>.supabase.co/functions/v1/waitlist/drain',
+          headers := jsonb_build_object('content-type', 'application/json', 'x-cron-key',
+                       (select decrypted_secret from vault.decrypted_secrets where name = 'waitlist_cron_key')),
+          body    := '{}'::jsonb, timeout_milliseconds := 60000) $$);
+      ```
+      Then test once: `select public.waitlist_set_paused(true);`, sign up with your own address
+      (no email), `select public.waitlist_set_paused(false);`, wait for the next run (email arrives).
 - [ ] Secrets set; `config.toml` has `verify_jwt=false` only for `waitlist` and `email-events`.
+- [ ] Unused features off (§7b): Auth "Allow new users to sign up" OFF, Realtime "Allow public access" OFF, no Storage buckets.
+- [ ] Supabase Advisors → Security Advisor: 0 errors.
+- [ ] Hostinger rules H-1…H-7 (§6b) done; `.htaccess` uploaded; `bash ci/check-live-site.sh` passes; securityheaders.com A+.
+- [ ] `docs/KEYS.md` inventory written (names and places only); admin-only browser profile in use.
+- [ ] Backups: know what your plan restores; encrypted export of the confirmed list before launch.
 - [ ] Turnstile widget: hostname = the real domain only; site key in `config.js`, secret in Supabase.
 - [ ] `_headers` connect-src = the real project URL.
 - [ ] Sending subdomain verified; SPF, DKIM, DMARC; sending-only key; webhook for bounced/complained.
@@ -333,7 +485,8 @@ changes `bash e2e/run.sh` — all green. New behavior = new test.
 ### Launch-day send
 Export with `waitlist_export_confirmed()` (owner, SQL editor), CSV through `toCsv()` if a human opens
 it, send with `launchMail()` (one-click headers, idempotency key per campaign), in batches, watch
-complaints and bounces, stop if complaints approach 0.1%.
+complaints and bounces, stop if complaints approach 0.1% (`select public.waitlist_set_paused(true);` stops confirmation
+emails too; auto-pause does this by itself on a spike).
 
 ## 12. Red-team list (try these before every release)
 Submit the same address 100× in parallel; submit 1,000 random addresses with a valid captcha; reuse one
@@ -342,7 +495,10 @@ headless browser and check the DB stays pending; POST confirm with no Origin; se
 send a 1 MB body; put `\r\nBcc:` and `=HYPERLINK()` in the email; use a Cyrillic domain; forge a
 webhook; replay an old webhook; unsubscribe someone else with your own token; turn Turnstile off
 (network block) and check signups fail closed; check the export contains no pending/suppressed rows;
-grep the logs for any `@`.
+grep the logs for any `@`; fill the hourly cap and check the next person is queued and emailed
+after the next drain (once); call `/drain` with no key and a wrong key (404); feed 5 hard bounces and
+check sending pauses and an alert arrives with no address in it.
+After every upload: `bash ci/check-live-site.sh` and the by-hand checks in §6b.
 
 ## 13. Sources
 - Cloudflare Turnstile server-side validation: https://developers.cloudflare.com/turnstile/get-started/server-side-validation/

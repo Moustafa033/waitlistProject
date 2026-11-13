@@ -356,3 +356,76 @@ Deno.test("response does not wait for the email provider (latency cannot reveal 
   assert(ms < 200, `answered in ${ms}ms while the provider takes 400ms`);
   await settle();
 });
+
+// ------------------------------------------------------------------ 0005 safety net: /drain + owner alerts
+const CRON = "c".repeat(40);
+const cronCfg: Config = { ...cfg, cronSecret: CRON, alertTo: "owner@example.com" };
+const SEND = { email: "queued@example.com", token: TOKEN, signup_id: "22222222-2222-4222-8222-222222222222", send_no: 1, hour: "2026-11-06T10:00:00Z" };
+const drainReq = (key?: string) => req("drain", {}, key === undefined ? { "content-type": "application/json" } : { "content-type": "application/json", "x-cron-key": key });
+
+Deno.test("drain: invisible without CRON_SECRET, and with a wrong/missing key (404 like any unknown route)", async () => {
+  const { f, calls } = fakeFetch();
+  eq((await makeHandler(deps(f))(drainReq(CRON))).status, 404, "not configured");
+  const h = makeHandler({ ...deps(f), cfg: cronCfg });
+  eq((await h(drainReq())).status, 404, "no key");
+  eq((await h(drainReq("c".repeat(39) + "d"))).status, 404, "wrong key");
+  eq((await h(drainReq(CRON + "x"))).status, 404, "longer key");
+  eq(calls.filter((c) => c.url.includes("/rpc/")).length, 0, "no database call without the right key");
+});
+
+Deno.test("drain: sends each queued person their confirmation, then emails the owner the alerts (counts only)", async () => {
+  const alerts = [{ kind: "global_send_cap", period: "2026-11-06T10:00:00Z", hits: 7, first_at: "2026-11-06T10:01:00Z", last_at: "2026-11-06T10:40:00Z" }];
+  const { f, calls } = fakeFetch({ rpc: { waitlist_drain_queue: { sends: [SEND, { ...SEND, email: "q2@example.com", signup_id: "33333333-3333-4333-8333-333333333333" }], left: 4, paused: false },
+                                          waitlist_take_alerts: alerts } });
+  const res = await makeHandler({ ...deps(f), cfg: cronCfg })(drainReq(CRON));
+  eq(res.status, 200);
+  const out = await res.json();
+  eq([out.sent, out.failed, out.left, out.alerts], [2, 0, 4, 1]);
+  const mails = calls.filter((c) => c.url.startsWith("https://api.resend.com")).map((c) => JSON.parse(c.body!));
+  eq(mails.map((m) => m.to[0]), ["queued@example.com", "q2@example.com", "owner@example.com"]);
+  assert(mails[0].text.includes(`/confirm#t=${TOKEN}`), "queued person gets the normal fragment link");
+  const alert = mails[2];
+  assert(alert.text.includes("7 time(s)") && alert.text.includes("waiting in the queue: 4"), "alert has the counts");
+  assert(!alert.text.includes("queued@example.com") && !alert.text.includes("q2@example.com"), "alert never contains a visitor's address");
+});
+
+Deno.test("drain: provider down -> units given back, the rest of the batch is not waited on", async () => {
+  const { f, calls } = fakeFetch({ resend: "down", rpc: { waitlist_drain_queue: { sends: [SEND, SEND, SEND], left: 0, paused: false }, waitlist_take_alerts: [] } });
+  const out = await (await makeHandler({ ...deps(f), cfg: cronCfg })(drainReq(CRON))).json();
+  eq([out.sent, out.failed], [0, 3]);
+  eq(calls.filter((c) => c.url.startsWith("https://api.resend.com")).length, 1, "only ONE attempt at the provider");
+  eq(calls.filter((c) => c.url.endsWith("/waitlist_send_failed")).length, 3, "all three units given back");
+});
+
+Deno.test("drain: a malformed row from the database is skipped, never mailed", async () => {
+  const { f, calls } = fakeFetch({ rpc: { waitlist_drain_queue: { sends: [{ ...SEND, email: "x@y.com\r\nBcc: a@b.com" }, { ...SEND, token: "short" }], left: 0, paused: true }, waitlist_take_alerts: [] } });
+  const out = await (await makeHandler({ ...deps(f), cfg: cronCfg })(drainReq(CRON))).json();
+  eq([out.sent, out.failed, out.paused], [0, 2, true]);
+  eq(calls.filter((c) => c.url.startsWith("https://api.resend.com")).length, 0);
+});
+
+Deno.test("auto-pause alert is marked urgent and tells the owner how to resume", async () => {
+  const { alertMail } = await import("../_shared/mailer.ts");
+  const m = await alertMail(cfg, "owner@example.com", [
+    { kind: "auto_paused", period: "2026-11-06T00:00:00Z", hits: 1, first_at: "2026-11-06T03:00:00Z", last_at: "2026-11-06T03:00:00Z" },
+    { kind: "<script>", period: "x", hits: 1, first_at: "x", last_at: "x" }], 12, true);
+  eq(m.subject, "Waitlist: sending PAUSED");
+  assert(m.text.includes("waitlist_set_paused(false)"), "resume instruction");
+  assert(!m.text.includes("<script>") && !m.html.includes("<script>"), "unknown alert kinds are dropped, never echoed");
+  assert(/^alert\/[0-9a-f]{32}$/.test(m.idempotencyKey), "re-running the job never sends the same alert twice");
+});
+
+Deno.test("config: CRON_SECRET must be long and header-safe; ALERT_TO must be a plain address", () => {
+  const base: Record<string, string> = { SUPABASE_URL: "https://r.supabase.co", SITE_ORIGIN: ORIGIN, WAITLIST_FUNCTION_URL: "https://r/f",
+    TURNSTILE_SECRET: "s", TURNSTILE_HOSTNAMES: "waitlist.example.com", RESEND_API_KEY: "re_x", MAIL_FROM: "a <a@b.com>", CONSENT_VERSION: "v1",
+    SUPABASE_SECRET_KEYS: JSON.stringify({ default: "sb_secret_abc" }) };
+  eq(loadConfig((n) => base[n]).cronSecret, undefined, "optional: off by default");
+  eq(loadConfig((n) => (n === "CRON_SECRET" ? CRON : base[n])).cronSecret, CRON);
+  eq(loadConfig((n) => (n === "ALERT_TO" ? " Owner@Example.com " : base[n])).alertTo, "owner@example.com");
+  for (const [k, v] of [["CRON_SECRET", "short"], ["CRON_SECRET", "a".repeat(40) + "\r\nx"], ["CRON_SECRET", "a".repeat(40) + " b"],
+                        ["ALERT_TO", "owner@example.com\r\nBcc: x@y.com"], ["ALERT_TO", "Owner <o@example.com>"]]) {
+    let threw = false;
+    try { loadConfig((n) => (n === k ? v : base[n])); } catch (e) { threw = e instanceof ConfigError; }
+    assert(threw, `${k}=${JSON.stringify(v)} must be refused`);
+  }
+});

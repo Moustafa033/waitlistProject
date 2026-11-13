@@ -24,6 +24,11 @@ export function normalizeEmail(raw: unknown): string {
   if (at < 1 || at !== e.lastIndexOf("@")) throw new HttpError(400, "invalid_email");
   const local = e.slice(0, at), domain = e.slice(at + 1);
   if (!LOCAL.test(local) || local.startsWith(".") || local.endsWith(".") || local.includes("..")) throw new HttpError(400, "invalid_email");
+  // Reject MIME "encoded-word" local parts (=?charset?enc?...?=). They are a known
+  // parser-confusion / email-spoofing trick: some mail software decodes them and can
+  // deliver the message somewhere other than what we validated. (PortSwigger, "Splitting
+  // the email atom".) No real local part needs "=?".
+  if (local.includes("=?")) throw new HttpError(400, "invalid_email");
   const labels = domain.split(".");
   if (labels.length < 2 || !labels.every((l) => LABEL.test(l))) throw new HttpError(400, "invalid_email");
   if (!/^[a-z]{2,63}$/.test(labels[labels.length - 1])) throw new HttpError(400, "invalid_email");

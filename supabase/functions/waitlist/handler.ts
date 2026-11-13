@@ -4,6 +4,8 @@
 //   POST /confirm      browser only, called by the explicit "Confirm" button (never on GET)
 //   POST /unsubscribe  RFC 8058 one-click (mail providers, no Origin) or our page
 //   GET  /count        coarse public counter, cacheable
+//   POST /drain        scheduled job only (secret header): sends the queue, emails owner alerts.
+//                      Without CRON_SECRET configured it does not exist (404).
 // Every signup answer is the SAME 202 whether the email is new, pending,
 // confirmed, suppressed, rate-limited or a detected bot (no enumeration, no
 // feedback that teaches a bot what worked).
@@ -12,7 +14,8 @@ import { corsHeaders, decodeUtf8, HttpError, json, log, onlyKeys, parseJsonObjec
 import { isDisposable, isToken, isUuid, normalizeEmail } from "../_shared/validate.ts";
 import { verifyTurnstile } from "../_shared/turnstile.ts";
 import { rpc } from "../_shared/db.ts";
-import { confirmationMail, ProviderNotReached, sendMail } from "../_shared/mailer.ts";
+import { alertMail, type Alert, confirmationMail, ProviderNotReached, sendMail } from "../_shared/mailer.ts";
+import { safeEqual } from "../_shared/svix.ts";
 import { DISPOSABLE } from "../_shared/disposable.ts";
 
 export interface Deps {
@@ -133,6 +136,46 @@ export function makeHandler(d: Deps): (req: Request) => Promise<Response> {
     return json(200, { ok: r.ok === true }, cors);
   }
 
+  // Scheduled job (pg_cron + pg_net every ~10 min). Same answer as an unknown route when the key
+  // is missing or wrong, so the route is invisible to scanners.
+  async function drain(req: Request): Promise<Response> {
+    if (!cfg.cronSecret || !safeEqual(req.headers.get("x-cron-key") ?? "", cfg.cronSecret)) throw new HttpError(404, "not_found");
+    type Send = { email: string; token: string; signup_id: string; send_no: number; hour: string };
+    const r = await rpc<{ sends: Send[]; left: number; paused: boolean }>(cfg, "waitlist_drain_queue", {}, d.fetchFn);
+    let sent = 0, failed = 0, providerDown = false;
+    for (const s of Array.isArray(r.sends) ? r.sends : []) {
+      let email: string;
+      try { email = normalizeEmail(s.email); } catch { failed++; continue; }
+      if (!isToken(s.token) || !isUuid(s.signup_id) || !Number.isInteger(s.send_no)) { failed++; continue; }
+      try {
+        // after one "provider not reached", do not wait on the rest (keeps the run short)
+        if (providerDown) throw new ProviderNotReached();
+        let unsub: string;
+        try { unsub = await rpc<string>(cfg, "waitlist_unsub_token", { p_signup_id: s.signup_id }, d.fetchFn); }
+        catch { throw new ProviderNotReached(); }
+        if (!isToken(unsub)) throw new ProviderNotReached();
+        await sendMail(cfg, confirmationMail(cfg, email, s.token, s.signup_id, s.send_no, unsub), d.fetchFn);
+        sent++;
+      } catch (e) {
+        failed++;
+        if (e instanceof ProviderNotReached) {
+          providerDown = true;
+          await rpc(cfg, "waitlist_send_failed", { p_hour: s.hour }, d.fetchFn).catch(() => {});
+        }
+      }
+    }
+    // Alerts are marked as handed out by the RPC. If the alert email fails they stay readable
+    // in private.alerts (and the log line below says so).
+    const alerts = await rpc<Alert[]>(cfg, "waitlist_take_alerts", {}, d.fetchFn).catch(() => [] as Alert[]);
+    let alerted = false;
+    if (alerts.length && cfg.alertTo) {
+      try { await sendMail(cfg, await alertMail(cfg, cfg.alertTo, alerts, r.left, r.paused), d.fetchFn); alerted = true; }
+      catch { log("waitlist.drain", 500, "alert_mail_failed"); }
+    }
+    log("waitlist.drain", 200, "ok", { sent, failed, left: r.left, paused: r.paused, alerts: alerts.length, alerted });
+    return json(200, { sent, failed, left: r.left, paused: r.paused, alerts: alerts.length });
+  }
+
   // tiny per-instance cache: a flood of GET /count does not become a flood of DB calls
   let cached: { n: number; at: number } | null = null;
   async function count(): Promise<Response> {
@@ -145,7 +188,7 @@ export function makeHandler(d: Deps): (req: Request) => Promise<Response> {
   return async (req: Request): Promise<Response> => {
     const url = new URL(req.url);
     const last = url.pathname.replace(/\/+$/, "").split("/").pop() ?? "";
-    const route = ["signup", "confirm", "unsubscribe", "erase", "count"].includes(last) ? last : "unknown"; // never log raw paths
+    const route = ["signup", "confirm", "unsubscribe", "erase", "count", "drain"].includes(last) ? last : "unknown"; // never log raw paths
     try {
       if (req.method === "OPTIONS") {
         // preflight only for our own site; others get no CORS grant
@@ -157,6 +200,7 @@ export function makeHandler(d: Deps): (req: Request) => Promise<Response> {
       if (route === "confirm") return await confirm(req);
       if (route === "unsubscribe") return await unsubscribe(req, url);
       if (route === "erase") return await erase(req);
+      if (route === "drain") return await drain(req);
       throw new HttpError(404, "not_found");
     } catch (e) {
       if (e instanceof HttpError) {

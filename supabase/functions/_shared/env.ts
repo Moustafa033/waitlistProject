@@ -15,9 +15,12 @@ export interface Config {
   mailReplyTo?: string;         // optional, e.g. "hello@example.com" (a real mailbox, e.g. at Hostinger)
   consentVersion: string;       // must equal private.settings.current_consent_version
   minFillMs: number;            // EXAMPLE: form filled faster than this => bot (weak signal)
+  cronSecret?: string;          // optional: unlocks POST /drain for the scheduled job (unset => /drain is 404)
+  alertTo?: string;             // optional: owner's address for safety-net alerts (counts only, never addresses)
 }
 
 type Env = (name: string) => string | undefined;
+const PLAIN_EMAIL = /^[a-z0-9._%+-]{1,64}@[a-z0-9-]+(\.[a-z0-9-]+)*\.[a-z]{2,63}$/;   // no name, no CR/LF: goes into a header
 const denoEnv: Env = (n) => Deno.env.get(n);
 
 function need(get: Env, name: string): string {
@@ -53,9 +56,14 @@ export function loadConfig(get: Env = denoEnv): Config {
   }
   // Plain address only (no display name, no CR/LF): it goes into an email header.
   const replyTo = (get("MAIL_REPLY_TO") ?? "").trim().toLowerCase();
-  if (replyTo !== "" && !/^[a-z0-9._%+-]{1,64}@[a-z0-9-]+(\.[a-z0-9-]+)*\.[a-z]{2,63}$/.test(replyTo)) {
+  if (replyTo !== "" && !PLAIN_EMAIL.test(replyTo)) {
     throw new ConfigError("MAIL_REPLY_TO must be a plain email address");
   }
+  // Scheduler key: long random string, only letters/digits/-/_ (it travels in a header).
+  const cron = (get("CRON_SECRET") ?? "").trim();
+  if (cron !== "" && !/^[A-Za-z0-9_-]{32,256}$/.test(cron)) throw new ConfigError("CRON_SECRET must be 32+ random letters/digits/-/_");
+  const alertTo = (get("ALERT_TO") ?? "").trim().toLowerCase();
+  if (alertTo !== "" && !PLAIN_EMAIL.test(alertTo)) throw new ConfigError("ALERT_TO must be a plain email address");
   return {
     supabaseUrl: need(get, "SUPABASE_URL").replace(/\/$/, ""),
     secretKey: secretKey(get),
@@ -68,5 +76,7 @@ export function loadConfig(get: Env = denoEnv): Config {
     mailReplyTo: replyTo === "" ? undefined : replyTo,
     consentVersion: need(get, "CONSENT_VERSION"),
     minFillMs: Number(minFillRaw),
+    cronSecret: cron === "" ? undefined : cron,
+    alertTo: alertTo === "" ? undefined : alertTo,
   };
 }

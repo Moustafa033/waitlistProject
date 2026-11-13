@@ -1,4 +1,8 @@
 \echo '--- double opt-in flow, identity, enumeration, tokens'
+-- 0004: the per-address cap tests below reuse ahmed@ / ahmed+1@ which now share one
+-- mailbox. Raise the mailbox cap so these tests exercise the per-ADDRESS cap in isolation;
+-- the per-mailbox cap has its own file (test_05_mailbox.sql). Restored at the end.
+update private.settings set value = '1000' where key = 'mailbox_sends_per_day';
 set role service_role;
 create temp table r(k text primary key, v jsonb);
 insert into r values ('a', public.waitlist_signup('  Ahmed@Example.com ', 'waitlist-v1', 'en', 'landing'));
@@ -60,3 +64,4 @@ set role service_role;
 select t.ok(public.waitlist_signup('ahmed+1@example.com', 'waitlist-v1')->>'reason' = 'address_lifetime_cap', '4th -> refused forever (an attacker cannot flood this inbox through us)');
 reset role;
 select t.ok((select confirm_sends from private.signups where email='ahmed+1@example.com') = 3, 'exactly 3 confirmation emails were ever issued');
+update private.settings set value = '3' where key = 'mailbox_sends_per_day';   -- restore default for later files

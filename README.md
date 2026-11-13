@@ -33,6 +33,8 @@ Results when this pack was built (2026-11-06): 75 SQL checks + 5 race checks, 19
 2. `supabase secrets set SITE_ORIGIN=… WAITLIST_FUNCTION_URL=… TURNSTILE_SECRET=… TURNSTILE_HOSTNAMES=…
    RESEND_API_KEY=… MAIL_FROM=… MAIL_REPLY_TO=… CONSENT_VERSION=waitlist-v4 RESEND_WEBHOOK_SECRET=…`, deploy both functions.
    (`MAIL_REPLY_TO` = a real mailbox you read, e.g. your Hostinger address.)
+   Safety net (migration 0005): also `CRON_SECRET=$(openssl rand -hex 32) ALERT_TO=<your inbox>`, then
+   schedule the drain (guide §11 "Before go-live"). Emergency stop: `select public.waitlist_set_paused(true);`
 3. Turnstile widget (free Cloudflare account; the domain does NOT move) for your domain only. Put the
    site key + function URL in `site/assets/config.js`, the project URL in the CSP `connect-src` of
    **both** `site/_headers` and `site/.htaccess`.

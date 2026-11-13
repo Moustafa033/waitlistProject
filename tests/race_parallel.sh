@@ -30,3 +30,17 @@ TOK=$($PG -c "set role service_role; select public.waitlist_signup('victim@examp
 res=$(race 20 "select public.waitlist_confirm('$TOK')->>'ok'")
 check "$(grep -c '^true$' <<<"$res" || true)" 1 "20 simultaneous clicks -> confirmed exactly once"
 check "$($PG -c "select count(*) from private.consent_events e join private.signups s on s.id=e.signup_id where s.email='victim@example.com' and e.event='confirmed'")" 1 "exactly one consent 'confirmed' event"
+
+# 4) queue drain under fire: 30 people queued, then 10 drain jobs AND 30 re-signups of the same
+#    people all at once -> everyone gets exactly ONE email, nothing deadlocks, queue ends empty.
+$PG -c "update private.settings set value='0' where key='global_sends_per_hour'; update private.settings set value='30' where key='resend_min_minutes'; delete from private.counters; delete from private.send_queue;" >/dev/null
+for i in $(seq 1 30); do $PG -c "set role service_role; select public.waitlist_signup('drain-$i@example.com','waitlist-v1')" >/dev/null; done
+check "$($PG -c "select count(*) from private.send_queue")" 30 "30 people queued while the cap is 0"
+$PG -c "update private.settings set value='500' where key='global_sends_per_hour'" >/dev/null
+res=$(race 40 "select case when :i <= 10 then (select jsonb_array_length(public.waitlist_drain_queue()->'sends'))::text
+                           else public.waitlist_signup('drain-' || (:i - 10) || '@example.com','waitlist-v1')->>'action' end")
+if grep -qi "deadlock\|ERROR" <<<"$res"; then echo "FAIL: drain race raised an error"; echo "$res" | grep -i error | head -3; exit 1; fi
+echo "ok   10 drains + 30 re-signups at once -> no deadlock, no error"
+check "$($PG -c "select count(*) from private.signups where email like 'drain-%' and confirm_sends <> 1")" 0 "every queued person got exactly ONE email"
+$PG -c "set role service_role; select public.waitlist_drain_queue()" >/dev/null
+check "$($PG -c "select count(*) from private.send_queue")" 0 "queue is empty after one more drain"

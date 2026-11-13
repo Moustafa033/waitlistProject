@@ -21,10 +21,10 @@ select t.ok(not exists (select 1 from pg_class c where c.relnamespace = 'private
 select t.ok((select array_agg(p.proname::text order by p.proname::text collate "C") from pg_proc p
               where p.pronamespace = 'public'::regnamespace and has_function_privilege('service_role', p.oid, 'execute')
                 and p.proname like 'waitlist_%')
-            = array['waitlist_confirm','waitlist_erase','waitlist_erase_by_token','waitlist_export_confirmed',
-                    'waitlist_maintenance','waitlist_public_count','waitlist_send_failed','waitlist_signup',
-                    'waitlist_suppress','waitlist_unsub_token','waitlist_unsubscribe'],
-  'service_role can execute exactly the 11 known waitlist RPCs (no surprise functions)');
+            = array['waitlist_confirm','waitlist_drain_queue','waitlist_erase','waitlist_erase_by_token','waitlist_export_confirmed',
+                    'waitlist_maintenance','waitlist_public_count','waitlist_send_failed','waitlist_set_paused','waitlist_signup',
+                    'waitlist_suppress','waitlist_take_alerts','waitlist_unsub_token','waitlist_unsubscribe'],
+  'service_role can execute exactly the 14 known waitlist RPCs (no surprise functions)');
 
 set role anon;
 select t.fails($$select public.waitlist_signup('a@example.com','waitlist-v1')$$, '42501', 'anon calls waitlist_signup directly');
