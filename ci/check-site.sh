@@ -33,6 +33,9 @@ grep -qi 'Strict-Transport-Security' "$H" || bad "no HSTS"
 
 # 5b) Hostinger/Apache config (site/.htaccess) must carry the SAME CSP and the core headers
 A="$S/.htaccess"
+# Audit #25: Hostinger gets ALL its protection (CSP, framing, canonical host, hidden files) from this
+# file. A release without it must fail here, not silently ship an unprotected site.
+[ -f "$A" ] || bad "missing site/.htaccess (Hostinger would serve the site with NO security headers)"
 if [ -f "$A" ]; then
   csp_h=$(sed -n 's/^[[:space:]]*Content-Security-Policy:[[:space:]]*//p' "$H")
   csp_a=$(sed -n 's/^Header always set Content-Security-Policy "\(.*\)"$/\1/p' "$A")

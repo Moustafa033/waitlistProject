@@ -59,6 +59,9 @@ export function makeHandler(d: Deps): (req: Request) => Promise<Response> {
 
     const r = await rpc<{ action: string; reason?: string; token?: string; signup_id?: string; send_no?: number; hour?: string }>(
       cfg, "waitlist_signup", { p_email: email, p_consent_version: cfg.consentVersion, p_locale: locale, p_source: source }, d.fetchFn);
+    // Audit #13: the database is on another consent version than this function (a release mismatch).
+    // Say so instead of "check your inbox"; it is about the release, never about the address.
+    if (r.action === "none" && r.reason === "stale_consent_version") throw new HttpError(409, "reload_page");
 
     if (r.action === "send" && r.token && r.signup_id && r.send_no && r.hour) {
       const { token, signup_id, send_no, hour } = r;
@@ -129,6 +132,13 @@ export function makeHandler(d: Deps): (req: Request) => Promise<Response> {
    *  back for every email that never reached the provider. If the provider could not be reached at all,
    *  the application goes back in the queue (0007) so the next job run retries it: nothing is lost, and
    *  the fixed idempotency keys stop the provider from delivering an email twice. */
+  // Audit #15: a requeue that fails or is refused (queue full) is logged, never silent. The application
+  // itself is always in the database, and the owner gets the partner_mail_skipped alert.
+  async function requeue(id: string): Promise<void> {
+    const ok = await rpc<boolean>(cfg, "waitlist_partner_requeue", { p_id: id }, d.fetchFn).catch(() => false);
+    if (ok !== true) log("waitlist.partner_mail", 500, "requeue_failed");
+  }
+
   async function sendPartnerMails(id: string, hour: string, app: PartnerApp): Promise<{ sent: number; down: boolean }> {
     const refund = () => rpc(cfg, "waitlist_send_failed", { p_hour: hour }, d.fetchFn).catch(() => {});
     let sent = 0, down = false;
@@ -140,7 +150,7 @@ export function makeHandler(d: Deps): (req: Request) => Promise<Response> {
       try { await sendMail(cfg, partnerOwnerMail(cfg.alertTo, id, app), d.fetchFn); sent++; log("waitlist.partner_mail", 200, "owner_sent"); }
       catch (e) { if (e instanceof ProviderNotReached) { down = true; await refund(); } log("waitlist.partner_mail", 500, "owner_failed"); }
     }
-    if (down) await rpc(cfg, "waitlist_partner_requeue", { p_id: id }, d.fetchFn).catch(() => log("waitlist.partner_mail", 500, "requeue_failed"));
+    if (down) await requeue(id);
     return { sent, down };
   }
 
@@ -235,7 +245,7 @@ export function makeHandler(d: Deps): (req: Request) => Promise<Response> {
           if (down) {   // provider went down mid-run: give the 2 units back and put the rest back in the queue
             await rpc(cfg, "waitlist_send_failed", { p_hour: s.hour }, d.fetchFn).catch(() => {});
             await rpc(cfg, "waitlist_send_failed", { p_hour: s.hour }, d.fetchFn).catch(() => {});
-            await rpc(cfg, "waitlist_partner_requeue", { p_id: s.id }, d.fetchFn).catch(() => {});
+            await requeue(s.id);
             pFailed += 2; pLeft++; continue;
           }
           let app: PartnerApp;
@@ -263,13 +273,17 @@ export function makeHandler(d: Deps): (req: Request) => Promise<Response> {
                        partner_sent: pSent, partner_failed: pFailed, partner_left: pLeft });
   }
 
-  // tiny per-instance cache: a flood of GET /count does not become a flood of DB calls
+  // tiny per-instance cache: a flood of GET /count does not become a flood of DB calls.
+  // Audit #12: the refresh itself is shared, so 100 requests arriving together start ONE query.
   let cached: { n: number; at: number } | null = null;
+  let refreshing: Promise<number> | null = null;
   async function count(): Promise<Response> {
     const now = (d.now ?? Date.now)();
-    if (!cached || now - cached.at > 60_000) cached = { n: await rpc<number>(cfg, "waitlist_public_count", {}, d.fetchFn), at: now };
-    const n = cached.n;
-    return json(200, { count: n }, { ...cors, "cache-control": "public, max-age=300" });
+    if (!cached || now - cached.at > 60_000) {
+      refreshing ??= rpc<number>(cfg, "waitlist_public_count", {}, d.fetchFn).finally(() => { refreshing = null; });
+      cached = { n: await refreshing, at: now };
+    }
+    return json(200, { count: cached.n }, { ...cors, "cache-control": "public, max-age=300" });
   }
 
   return async (req: Request): Promise<Response> => {

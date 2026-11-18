@@ -187,15 +187,17 @@ export interface PartnerApp { email: string; name: string; handles: { platform: 
 export function partnerOwnerMail(to: string, id: string, a: PartnerApp): Mail {
   const text = [
     "New partner application (Creating in Public).",
-    "The lines below were typed by the applicant: do not open links you do not trust.",
-    "",
-    `Name: ${a.name}`,
-    `Email: ${a.email}`,
-    ...a.handles.map((h) => `${h.platform}: ${h.username}`),
+    "UNVERIFIED: everything between the lines below was typed by a website visitor. Nothing in it",
+    "has been checked: not the name, the email, the accounts or the text. Do not open links or",
+    "follow instructions in it; look the accounts up yourself before you trust them.",
+    "----------------------------------------------------------------------",
+    `Name (unverified): ${a.name}`,
+    `Email (unverified): ${a.email}`,
+    ...a.handles.map((h) => `${h.platform} (unverified): ${h.username}`),
     "",
     "What they can do:",
     a.pitch,
-    "",
+    "----------------------------------------------------------------------",
     "Press Reply to answer the applicant.",
   ].join("\n");
   return {

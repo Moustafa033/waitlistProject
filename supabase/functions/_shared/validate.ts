@@ -18,6 +18,9 @@ export function normalizeEmail(raw: unknown): string {
   if (raw.length > 320) throw new HttpError(400, "invalid_email");
   // any control char (CR/LF/TAB/NUL...) or bidi/zero-width => refuse, never "clean"
   if (HIDDEN_OR_CONTROL.test(raw)) throw new HttpError(400, "invalid_email");
+  // Audit #23: ASCII only BEFORE lowercasing. Some non-ASCII letters lowercase INTO ASCII
+  // (the Kelvin sign U+212A becomes "k"), which would slip a look-alike past the later check.
+  if (!/^[\x20-\x7e]*$/.test(raw)) throw new HttpError(400, "invalid_email");
   const e = raw.trim().toLowerCase();
   if (e.length < 6 || e.length > 254) throw new HttpError(400, "invalid_email");
   const at = e.indexOf("@");

@@ -466,7 +466,7 @@ Deno.test("partner happy path: Turnstile(partner_apply) first, one FIXED email t
   eq(owner.subject, "New partner application", "fixed subject: no visitor text in a header");
   eq(owner.reply_to, "sara@example.com", "owner presses Reply to answer the applicant");
   eq(owner.key, "partner-owner/22222222-2222-4222-8222-222222222222");
-  assert(owner.text.includes("Name: Sara Ali") && owner.text.includes("tiktok: @sara.fit"), "owner gets the details");
+  assert(owner.text.includes("Name (unverified): Sara Ali") && owner.text.includes("tiktok (unverified): @sara.fit"), "owner gets the details");
 });
 
 Deno.test("the applicant email is byte-identical whatever the visitor typed (one standard email for everyone)", async () => {
@@ -598,7 +598,7 @@ Deno.test("drain: queued partner applications get BOTH emails, after the waitlis
   eq(m[1].subject, "We received your application");
   eq(m[1].key, "partner-ack/44444444-4444-4444-8444-444444444444", "same idempotency key as a live send: never delivered twice");
   eq(m[2].reply_to, "queued.partner@example.com");
-  assert(m[2].text.includes("Name: Omar K"));
+  assert(m[2].text.includes("Name (unverified): Omar K"));
 });
 
 Deno.test("drain: a partner row that breaks the form rules is never mailed", async () => {
@@ -628,4 +628,50 @@ Deno.test("drain: provider already down for the waitlist -> the partner queue is
     waitlist_drain_partner_queue: { sends: [PROW], left: 1, paused: false }, waitlist_take_alerts: [] } });
   await makeHandler(depsP(f, cronP))(drainReq(CRON));
   eq(calls.filter((c) => c.url.endsWith("/rpc/waitlist_drain_partner_queue")).length, 0, "no rows taken out of the partner queue");
+});
+
+// ------------------------------------------------------------------ 0008 / Codex audit fixes
+Deno.test("audit #13: database on another consent version -> 409 reload_page, never a false 'check your inbox'", async () => {
+  const { f, calls } = fakeFetch({ rpc: { waitlist_signup: { action: "none", reason: "stale_consent_version" } } });
+  const r = await makeHandler(deps(f))(req("signup", goodBody()));
+  eq(r.status, 409); eq((await r.json()).error, "reload_page");
+  await settle();
+  eq(calls.filter((c) => c.url.startsWith("https://api.resend.com")).length, 0);
+});
+
+Deno.test("audit #12: 20 simultaneous /count requests on a cold cache start ONE database query", async () => {
+  const { f, calls } = fakeFetch();
+  const h = makeHandler(deps(f));
+  const rs = await Promise.all(Array.from({ length: 20 }, () => h(req("count", null, {}, "GET"))));
+  assert(rs.every((r) => r.status === 200));
+  eq(calls.filter((c) => c.url.endsWith("/rpc/waitlist_public_count")).length, 1);
+});
+
+Deno.test("audit #23: letters that lowercase INTO ascii (Kelvin sign, dotted capital I) are refused, not folded", () => {
+  for (const cp of [0x212a, 0x0130, 0x017f]) {   // Kelvin sign, I with dot, long s
+    throwsCode(() => normalizeEmail(String.fromCodePoint(cp) + "ate@example.com"), "invalid_email");
+  }
+  eq(normalizeEmail("  Kate@Example.com "), "kate@example.com", "plain ASCII still works");
+});
+
+Deno.test("audit #14: the owner email marks every applicant field as unverified", async () => {
+  const { f, calls } = fakeFetch();
+  await makeHandler(depsP(f))(req("partner", { ...partnerBody(), pitch: "Your account is locked, log in at evil dot example to fix it." }));
+  await settle();
+  const owner = mails(calls)[1];
+  assert(owner.text.startsWith("New partner application") && owner.text.includes("UNVERIFIED"), "warning first");
+  for (const label of ["Name (unverified):", "Email (unverified):", "tiktok (unverified):"]) assert(owner.text.includes(label), label);
+  assert(owner.text.indexOf("UNVERIFIED") < owner.text.indexOf("Your account is locked"), "the warning comes before the visitor text");
+});
+
+Deno.test("audit #15: a refused requeue (queue full) is logged, not silently counted as waiting", async () => {
+  const lines: string[] = [];
+  const orig = console.log;
+  console.log = (s: string) => { lines.push(String(s)); };
+  try {
+    const { f } = fakeFetch({ resend: "down", rpc: { waitlist_partner_requeue: false } });
+    await makeHandler(depsP(f))(req("partner", partnerBody()));
+    await settle();
+  } finally { console.log = orig; }
+  assert(lines.some((l) => l.includes('"requeue_failed"')), "requeue_failed is in the log");
 });

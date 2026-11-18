@@ -67,3 +67,17 @@ if grep -qi "deadlock\|ERROR" <<<"$res"; then echo "FAIL: partner drain race rai
 check "$(grep -cE '^[0-9a-f-]{36}$' <<<"$res" || true)" 30 "10 simultaneous drains -> 30 sends in total"
 check "$(grep -E '^[0-9a-f-]{36}$' <<<"$res" | sort -u | wc -l | tr -d ' ')" 30 "no application sent twice"
 check "$($PG -c "select count(*) from private.partner_mail_queue")" 0 "partner queue empty"
+
+# 0008 / audit #11) "Delete my data" and a bounce webhook for the SAME address at the same moment,
+# 20 addresses x 2 sessions: before 0008 the two took their locks in opposite order (deadlock risk).
+$PG -c "delete from private.suppressions; delete from private.counters; update private.settings set value='500' where key='global_sends_per_hour'; update private.settings set value='100000' where key='global_sends_per_day'; update private.settings set value='100' where key='mailbox_sends_per_day';" >/dev/null
+for i in $(seq 1 20); do $PG -c "set role service_role; select public.waitlist_signup('dl-$i@example.com', 'waitlist-v1')" >/dev/null; done
+$PG -c "create table if not exists public.race_tok as select id, email, public.waitlist_unsub_token(id) tok from private.signups where email like 'dl-%'; grant select on public.race_tok to service_role;" >/dev/null
+res=$(race 40 "select case when :i % 2 = 0
+  then (select (public.waitlist_erase_by_token(id, tok)->>'ok') from public.race_tok where email = 'dl-' || (:i / 2) || '@example.com')
+  else (select public.waitlist_suppress('dl-' || ((:i + 1) / 2) || '@example.com', 'hard_bounce')::text) end")
+if grep -qi "deadlock\|ERROR" <<<"$res"; then echo "FAIL: erase vs suppress raised an error"; grep -i error <<<"$res" | head -3; exit 1; fi
+echo "ok   20 x (delete-my-data + bounce webhook) at the same moment -> no deadlock, no error"
+check "$($PG -c "select count(*) from private.signups where email like 'dl-%'")" 0 "every signup erased"
+check "$($PG -c "select count(*) from private.suppressions")" 20 "every address on the do-not-email list exactly once"
+$PG -c "drop table public.race_tok" >/dev/null
