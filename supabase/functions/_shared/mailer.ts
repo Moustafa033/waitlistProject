@@ -148,20 +148,23 @@ export async function alertMail(_cfg: Config, to: string, alerts: Alert[], queue
 }
 
 // ---------------------------------------------------------------- partner applications
-const ACK_TEXT = "Thanks for applying to work with Creating in Public. We'll review your application and get in touch as soon as possible.";
-const ACK_IGNORE = "Didn't apply? Just ignore this email. You won't hear from us again.";
+const PCONF_TEXT = "Thanks for applying to work with Saigenai. One more tap and your application is in.";
+const PCONF_IGNORE = "Didn't apply? Just ignore this email. The application is deleted automatically and we won't email you about it again.";
 
-/** The ONE standard email every applicant gets. Fixed text only: nothing the visitor typed
- *  (not even their name) is ever put in it, so the form cannot be used to send spam. */
-export function partnerAckMail(cfg: Config, to: string, id: string): Mail {
+/** The ONE standard email every applicant gets (0009): a confirmation link. Fixed text only: nothing
+ *  the visitor typed (not even their name) is ever put in it, so the form cannot be used to send spam.
+ *  The token travels in the URL FRAGMENT (#), so it never reaches a server log, proxy or Referer. */
+export function partnerConfirmMail(cfg: Config, to: string, token: string, id: string, sendNo: number): Mail {
+  const link = `${cfg.siteOrigin}/partners-confirm#t=${token}`;
   const font = "-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif";
   const logo = `${esc(cfg.siteOrigin)}/email-logo.png`;
   return {
     to,
-    subject: "We received your application",
-    text: `We received your application\n\n${ACK_TEXT}\n\n${ACK_IGNORE}\n\nCreating in Public`,
-    html: `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="color-scheme" content="light"><title>We received your application</title></head>
+    subject: "Confirm your application",
+    text: `Confirm your application\n\n${PCONF_TEXT}\n\nConfirm: ${link}\n\n${PCONF_IGNORE}\n\nCreating in Public`,
+    html: `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="color-scheme" content="light"><title>Confirm your application</title></head>
 <body style="margin:0;padding:0;background:#f4f4f3;">
+<div style="display:none;max-height:0;overflow:hidden;opacity:0;mso-hide:all;">One more tap and your application is in.</div>
 <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="background:#f4f4f3;"><tr><td align="center" style="padding:32px 16px;">
 <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="max-width:480px;background:#ffffff;border:1px solid #ececea;border-radius:14px;">
 <tr><td style="padding:28px 26px;font-family:${font};color:#111111;">
@@ -169,14 +172,17 @@ export function partnerAckMail(cfg: Config, to: string, id: string): Mail {
 <td style="padding-right:8px;vertical-align:middle;"><img src="${logo}" width="20" height="20" alt="" style="display:block;border:0;"></td>
 <td style="vertical-align:middle;font-size:15px;font-weight:600;letter-spacing:-0.2px;color:#111111;">Creating in Public</td>
 </tr></table>
-<h1 style="margin:22px 0 0;font-size:24px;line-height:1.2;font-weight:700;letter-spacing:-0.6px;color:#111111;">We received your application</h1>
+<h1 style="margin:22px 0 0;font-size:24px;line-height:1.2;font-weight:700;letter-spacing:-0.6px;color:#111111;">Confirm your application</h1>
 <div style="margin:8px 0 16px;width:150px;height:3px;border-radius:3px;background-color:#8f7cf0;background-image:linear-gradient(90deg,#ff8a3d,#6b7bff);line-height:3px;font-size:0;">&nbsp;</div>
-<p style="margin:0;font-size:15px;line-height:1.55;color:#2b2b2b;">${esc(ACK_TEXT)}</p>
-<p style="margin:22px 0 0;padding-top:14px;border-top:1px solid #ececea;font-size:12px;line-height:1.5;color:#6b6b6b;">${esc(ACK_IGNORE)}</p>
+<p style="margin:0 0 20px;font-size:15px;line-height:1.55;color:#2b2b2b;">${esc(PCONF_TEXT)}</p>
+<table role="presentation" cellpadding="0" cellspacing="0" border="0"><tr><td style="border-radius:999px;background:#111111;">
+<a href="${esc(link)}" style="display:inline-block;padding:13px 28px;font-family:${font};font-size:15px;font-weight:600;color:#ffffff;text-decoration:none;border-radius:999px;">Confirm application</a>
+</td></tr></table>
+<p style="margin:22px 0 0;padding-top:14px;border-top:1px solid #ececea;font-size:12px;line-height:1.5;color:#6b6b6b;">${esc(PCONF_IGNORE)}</p>
 </td></tr></table>
 </td></tr></table>
 </body></html>`,
-    idempotencyKey: `partner-ack/${id}`,
+    idempotencyKey: `partner-confirm/${id}/${sendNo}`,
   };
 }
 

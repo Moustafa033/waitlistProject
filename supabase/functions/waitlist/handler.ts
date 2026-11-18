@@ -1,7 +1,8 @@
 // The ONE public endpoint of the waitlist (deployed with verify_jwt = false,
 // because visitors have no account). Everything it does is bounded:
 //   POST /signup       browser only (exact Origin) + Turnstile + honeypot + validation
-//   POST /partner      "Work with us" application: same protections, one per address ever
+//   POST /partner      "Work with us" application: same protections; stored pending, confirmation link emailed
+//   POST /partner-confirm  the applicant presses "Confirm application": only then it counts and the owner is told
 //   POST /confirm      browser only, called by the explicit "Confirm" button (never on GET)
 //   POST /unsubscribe  RFC 8058 one-click (mail providers, no Origin) or our page
 //   GET  /count        coarse public counter, cacheable
@@ -15,7 +16,7 @@ import { corsHeaders, decodeUtf8, HttpError, json, log, onlyKeys, parseJsonObjec
 import { isDisposable, isToken, isUuid, normalizeEmail, partnerHandles, partnerName, partnerPitch } from "../_shared/validate.ts";
 import { verifyTurnstile } from "../_shared/turnstile.ts";
 import { rpc } from "../_shared/db.ts";
-import { alertMail, type Alert, confirmationMail, partnerAckMail, partnerOwnerMail, type PartnerApp, ProviderNotReached, sendMail } from "../_shared/mailer.ts";
+import { alertMail, type Alert, confirmationMail, type Mail, partnerConfirmMail, partnerOwnerMail, type PartnerApp, ProviderNotReached, sendMail } from "../_shared/mailer.ts";
 import { safeEqual } from "../_shared/svix.ts";
 import { DISPOSABLE } from "../_shared/disposable.ts";
 
@@ -92,11 +93,12 @@ export function makeHandler(d: Deps): (req: Request) => Promise<Response> {
     return json(202, ACCEPTED, cors);
   }
 
-  // "Work with us" (site/partners.html). Same protections as signup. One application per address,
-  // ever (the database decides). The visitor gets the SAME 202 for new / already applied / suppressed /
-  // bot, so the form never tells anyone whether an address applied. Only "busy" (the site-wide daily
-  // cap) is said out loud: it reveals nothing about any person.
-  const PARTNER_OK = { ok: true, message: "application_received" } as const;
+  // "Work with us" (site/partners.html). Same protections as signup. Since 0009 an application only
+  // counts once the applicant confirms the email address (audit #1): this route stores it as pending
+  // and emails ONE fixed confirmation link. The visitor gets the SAME 202 for new / pending / already
+  // applied / suppressed / limited / bot. Only "busy" (the site-wide daily cap, decided before anything
+  // about the address) is said out loud: it reveals nothing about any person.
+  const PARTNER_OK = { ok: true, message: "check_inbox" } as const;
   async function partner(req: Request): Promise<Response> {
     requireOrigin(req, cfg.siteOrigin);
     if (!(req.headers.get("content-type") ?? "").startsWith("application/json")) throw new HttpError(415, "invalid_body");
@@ -115,23 +117,41 @@ export function makeHandler(d: Deps): (req: Request) => Promise<Response> {
 
     await verifyTurnstile(body.turnstile, { secret: cfg.turnstileSecret, hostnames: cfg.turnstileHostnames, action: "partner_apply", fetchFn: d.fetchFn });
 
-    const r = await rpc<{ action: string; reason?: string; id?: string; hour?: string }>(cfg, "waitlist_partner_apply",
+    const r = await rpc<{ action: string; reason?: string; id?: string; token?: string; send_no?: number; hour?: string }>(cfg, "waitlist_partner_apply",
       { p_email: email, p_name: app.name, p_handles: app.handles, p_pitch: app.pitch, p_consent_version: body.consent_version }, d.fetchFn);
     if (r.action === "none" && r.reason === "stale_consent_version") throw new HttpError(409, "reload_page");
     if (r.action === "none" && r.reason === "invalid_fields") throw new HttpError(400, "invalid_fields");
     if (r.action === "none" && r.reason === "busy") throw new HttpError(429, "busy");
 
-    if (r.action === "send" && r.id && isUuid(r.id) && r.hour) {
-      const { id, hour } = r;
-      d.background(sendPartnerMails(id, hour, app));
+    if (r.action === "send" && r.id && isUuid(r.id) && isToken(r.token) && Number.isInteger(r.send_no) && r.hour) {
+      d.background(sendPartnerConfirm(r.id, email, r.token, r.send_no!, r.hour));
     }
     return done(r.action === "send" ? "sent" : (r.reason ?? r.action));
   }
 
-  /** Both partner emails for one application. The database already took 2 send units; one is given
-   *  back for every email that never reached the provider. If the provider could not be reached at all,
-   *  the application goes back in the queue (0007) so the next job run retries it: nothing is lost, and
-   *  the fixed idempotency keys stop the provider from delivering an email twice. */
+  // The person pressed "Confirm application" on site/partners-confirm.html (never on GET: link scanners).
+  // Only now does the application count, and only now is the owner told.
+  async function partnerConfirm(req: Request): Promise<Response> {
+    requireOrigin(req, cfg.siteOrigin);
+    if (!(req.headers.get("content-type") ?? "").startsWith("application/json")) throw new HttpError(415, "invalid_body");
+    const body = parseJsonObject(await readBodyCapped(req, 3072));
+    onlyKeys(body, ["token", "turnstile"]);
+    if (!isToken(body.token)) return json(200, { ok: false }, cors);
+    await verifyTurnstile(body.turnstile, { secret: cfg.turnstileSecret, hostnames: cfg.turnstileHostnames, action: "partner_confirm", fetchFn: d.fetchFn });
+    type R = { ok: boolean; action?: string; id?: string; hour?: string; email?: string; name?: string; handles?: unknown; pitch?: string };
+    const r = await rpc<R>(cfg, "waitlist_partner_confirm", { p_token: body.token }, d.fetchFn);
+    log("waitlist.partner_confirm", 200, r.ok ? (r.action ?? "confirmed") : "invalid_or_expired");
+    if (r.ok === true && r.action === "send" && isUuid(r.id) && typeof r.hour === "string") {
+      let app: PartnerApp | null = null;
+      try {   // the stored row passes the same rules as the live form, or no email is built from it
+        app = { email: normalizeEmail(r.email), name: partnerName(r.name), handles: partnerHandles(r.handles), pitch: partnerPitch(r.pitch) };
+      } catch { log("waitlist.partner_mail", 500, "bad_row"); }
+      if (app) d.background(sendPartnerOwner(r.id, r.hour, app));
+      else await rpc(cfg, "waitlist_send_failed", { p_hour: r.hour }, d.fetchFn).catch(() => {});
+    }
+    return json(200, { ok: r.ok === true }, cors);
+  }
+
   // Audit #15: a requeue that fails or is refused (queue full) is logged, never silent. The application
   // itself is always in the database, and the owner gets the partner_mail_skipped alert.
   async function requeue(id: string): Promise<void> {
@@ -139,20 +159,30 @@ export function makeHandler(d: Deps): (req: Request) => Promise<Response> {
     if (ok !== true) log("waitlist.partner_mail", 500, "requeue_failed");
   }
 
-  async function sendPartnerMails(id: string, hour: string, app: PartnerApp): Promise<{ sent: number; down: boolean }> {
-    const refund = () => rpc(cfg, "waitlist_send_failed", { p_hour: hour }, d.fetchFn).catch(() => {});
-    let sent = 0, down = false;
-    try { await sendMail(cfg, partnerAckMail(cfg, app.email, id), d.fetchFn); sent++; log("waitlist.partner_mail", 200, "ack_sent"); }
-    catch (e) { if (e instanceof ProviderNotReached) { down = true; await refund(); } log("waitlist.partner_mail", 500, "ack_failed"); }
-    if (!cfg.alertTo) { await refund(); }            // no owner inbox configured: the application is in the database
-    else if (down) { await refund(); }               // provider unreachable: do not wait on a second timeout
-    else {
-      try { await sendMail(cfg, partnerOwnerMail(cfg.alertTo, id, app), d.fetchFn); sent++; log("waitlist.partner_mail", 200, "owner_sent"); }
-      catch (e) { if (e instanceof ProviderNotReached) { down = true; await refund(); } log("waitlist.partner_mail", 500, "owner_failed"); }
+  /** One partner email. The database already took its send unit. If the provider was not reached,
+   *  the unit is given back and the application goes back in the queue, so the next job run retries it
+   *  (the row's status decides what is sent). Returns whether the provider could not be reached. */
+  async function partnerSend(id: string, hour: string, m: () => Mail, code: string): Promise<{ sent: boolean; down: boolean }> {
+    try { await sendMail(cfg, m(), d.fetchFn); log("waitlist.partner_mail", 200, `${code}_sent`); return { sent: true, down: false }; }
+    catch (e) {
+      log("waitlist.partner_mail", 500, `${code}_failed`);
+      if (!(e instanceof ProviderNotReached)) return { sent: false, down: false };
+      await rpc(cfg, "waitlist_send_failed", { p_hour: hour }, d.fetchFn).catch(() => {});
+      await requeue(id);
+      return { sent: false, down: true };
     }
-    if (down) await requeue(id);
-    return { sent, down };
   }
+  const sendPartnerConfirm = (id: string, email: string, token: string, sendNo: number, hour: string) =>
+    partnerSend(id, hour, () => partnerConfirmMail(cfg, email, token, id, sendNo), "confirm");
+  async function sendPartnerOwner(id: string, hour: string, app: PartnerApp): Promise<{ sent: boolean; down: boolean }> {
+    if (!cfg.alertTo) {   // no owner inbox configured: the confirmed application is in the database
+      await rpc(cfg, "waitlist_send_failed", { p_hour: hour }, d.fetchFn).catch(() => {});
+      return { sent: false, down: false };
+    }
+    const to = cfg.alertTo;
+    return await partnerSend(id, hour, () => partnerOwnerMail(to, id, app), "owner");
+  }
+
 
   async function confirm(req: Request): Promise<Response> {
     requireOrigin(req, cfg.siteOrigin);
@@ -230,10 +260,12 @@ export function makeHandler(d: Deps): (req: Request) => Promise<Response> {
         }
       }
     }
-    // 0007: then the partner queue (waitlist confirmations keep priority). Every row is re-validated
-    // with the same rules as the live form before anything is sent; a bad row is dropped, never mailed.
-    type PSend = { id: string; email: string; name: string; handles: unknown; pitch: string; hour: string };
-    // If the provider was unreachable for the waitlist part, the partner queue is not touched at all this run.
+
+    // 0007/0009: then the partner queue (waitlist confirmations keep priority). Each row is ONE email:
+    // "confirm" = the applicant's confirmation link, "owner" = the notice of a confirmed application.
+    // Every row is re-validated with the live form's rules; a bad row is dropped, never mailed.
+    // If the provider was unreachable for the waitlist part, the partner queue is not touched this run.
+    type PSend = { kind: string; id: string; email: string; token?: string; send_no?: number; name?: string; handles?: unknown; pitch?: string; hour: string };
     let pSent = 0, pFailed = 0, pLeft = 0;
     if (!providerDown) {
       try {
@@ -241,19 +273,23 @@ export function makeHandler(d: Deps): (req: Request) => Promise<Response> {
         pLeft = Number(pr.left) | 0;
         let down = false;
         for (const s of Array.isArray(pr.sends) ? pr.sends : []) {
-          if (!isUuid(s.id) || typeof s.hour !== "string") { pFailed += 2; continue; }
-          if (down) {   // provider went down mid-run: give the 2 units back and put the rest back in the queue
-            await rpc(cfg, "waitlist_send_failed", { p_hour: s.hour }, d.fetchFn).catch(() => {});
+          if (!isUuid(s.id) || typeof s.hour !== "string") { pFailed++; continue; }
+          if (down) {   // provider went down mid-run: give the unit back and put the rest back in the queue
             await rpc(cfg, "waitlist_send_failed", { p_hour: s.hour }, d.fetchFn).catch(() => {});
             await requeue(s.id);
-            pFailed += 2; pLeft++; continue;
+            pFailed++; pLeft++; continue;
           }
-          let app: PartnerApp;
+          let r2: { sent: boolean; down: boolean };
           try {
-            app = { email: normalizeEmail(s.email), name: partnerName(s.name), handles: partnerHandles(s.handles), pitch: partnerPitch(s.pitch) };
-          } catch { pFailed += 2; continue; }   // a row that fails the live form's rules is never mailed
-          const r2 = await sendPartnerMails(s.id, s.hour, app);
-          pSent += r2.sent; pFailed += 2 - r2.sent;
+            if (s.kind === "confirm") {
+              if (!isToken(s.token) || !Number.isInteger(s.send_no)) throw new Error("row");
+              r2 = await sendPartnerConfirm(s.id, normalizeEmail(s.email), s.token, s.send_no!, s.hour);
+            } else if (s.kind === "owner") {
+              const app = { email: normalizeEmail(s.email), name: partnerName(s.name), handles: partnerHandles(s.handles), pitch: partnerPitch(s.pitch) };
+              r2 = await sendPartnerOwner(s.id, s.hour, app);
+            } else throw new Error("kind");
+          } catch { pFailed++; continue; }   // a row that fails the live form's rules is never mailed
+          if (r2.sent) pSent++; else pFailed++;
           if (r2.down) { down = true; pLeft++; }
         }
       } catch { log("waitlist.drain", 500, "partner_queue_failed"); }
@@ -289,7 +325,7 @@ export function makeHandler(d: Deps): (req: Request) => Promise<Response> {
   return async (req: Request): Promise<Response> => {
     const url = new URL(req.url);
     const last = url.pathname.replace(/\/+$/, "").split("/").pop() ?? "";
-    const route = ["signup", "partner", "confirm", "unsubscribe", "erase", "count", "drain"].includes(last) ? last : "unknown"; // never log raw paths
+    const route = ["signup", "partner", "partner-confirm", "confirm", "unsubscribe", "erase", "count", "drain"].includes(last) ? last : "unknown"; // never log raw paths
     try {
       if (req.method === "OPTIONS") {
         // preflight only for our own site; others get no CORS grant
@@ -299,6 +335,7 @@ export function makeHandler(d: Deps): (req: Request) => Promise<Response> {
       if (req.method !== "POST") throw new HttpError(405, "method_not_allowed");  // GET never changes state
       if (route === "signup") return await signup(req);
       if (route === "partner") return await partner(req);
+      if (route === "partner-confirm") return await partnerConfirm(req);
       if (route === "confirm") return await confirm(req);
       if (route === "unsubscribe") return await unsubscribe(req, url);
       if (route === "erase") return await erase(req);

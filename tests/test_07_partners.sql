@@ -26,17 +26,22 @@ select t.fails($$select * from private.partner_applications$$, '42501', 'even se
 select t.fails($$delete from private.partner_applications$$, '42501', 'service_role cannot delete applications directly');
 reset role;
 
-\echo '--- 0006: one application per address, EVER'
+\echo '--- 0006/0009: one application per address (confirmed); a pending one is rate-limited'
 set role service_role;
-select t.ok(t.apply('partner-1@example.com')->>'action' = 'send', 'first application -> saved + 2 emails');
-select t.ok(t.apply('partner-1@example.com')->>'reason' = 'already_applied', 'second try, same address -> nothing');
-select t.ok(t.apply('  Partner-1@Example.COM ')->>'reason' = 'already_applied', 'case/space tricks are the same address');
-select t.ok(t.apply('partner-1@example.com', 'Other Name', '[{"platform":"youtube","username":"other"}]', 'Completely different text here')->>'reason' = 'already_applied',
-  'different details, same address -> still refused');
+select t.ok(t.apply('partner-1@example.com')->>'action' = 'send', 'first application -> stored PENDING + 1 confirmation email');
+select t.ok(t.apply('partner-1@example.com')->>'reason' = 'too_soon', 'second try at once -> nothing (link rate limit)');
+select t.ok(t.apply('  Partner-1@Example.COM ')->>'reason' = 'too_soon', 'case/space tricks are the same address');
 reset role;
 select t.ok((select count(*) from private.partner_applications where email = 'partner-1@example.com') = 1, 'exactly one row for that address');
-select t.ok((select used from private.counters where bucket = 'send_hour') = 2, 'only the first try took send units (2: applicant + owner)');
+select t.ok((select status from private.partner_applications where email = 'partner-1@example.com') = 'pending', 'it is pending until confirmed');
+select t.ok((select used from private.counters where bucket = 'send_hour') = 1, 'only the first try took a send unit (1: the confirmation link)');
 select t.ok((select used from private.counters where bucket = 'partner_day') = 1, 'repeats do not use the daily application cap');
+-- confirmed => the address's one application is used for good
+update private.partner_applications set status = 'confirmed', confirmed_at = now(), confirm_token_hash = null where email = 'partner-1@example.com';
+set role service_role;
+select t.ok(t.apply('partner-1@example.com', 'Other Name', '[{"platform":"youtube","username":"other"}]', 'Completely different text here')->>'reason' = 'already_applied',
+  'once confirmed: different details, same address -> refused');
+reset role;
 -- an application does NOT put anyone on the waitlist
 select t.ok(not exists (select 1 from private.signups where email = 'partner-1@example.com'), 'applying never adds the address to the waitlist');
 
@@ -87,12 +92,12 @@ select t.ok(not exists (select 1 from private.partner_applications where email =
 update private.settings set value = '20' where key = 'partner_per_day';
 
 \echo '--- 0006: full send cap or kill switch -> saved without email, owner alerted'
-update private.settings set value = '1' where key = 'global_sends_per_hour';
+update private.settings set value = '0' where key = 'global_sends_per_hour';
 delete from private.counters where bucket in ('send_hour', 'partner_day'); delete from private.alerts;
 set role service_role;
-select t.ok(t.apply('cap-mail@example.com')->>'action' = 'saved', 'only 1 send unit left (needs 2) -> saved, no email');
+select t.ok(t.apply('cap-mail@example.com')->>'action' = 'saved', 'no send unit left -> saved, no email (queued)');
 reset role;
-select t.ok(coalesce((select used from private.counters where bucket = 'send_hour'), 0) = 0, 'the half-taken unit was given back');
+select t.ok(coalesce((select used from private.counters where bucket = 'send_hour'), 0) = 0, 'no unit stays taken');
 select t.ok(exists (select 1 from private.partner_applications where email = 'cap-mail@example.com'), 'the application is not lost');
 select t.ok((select hits from private.alerts where kind = 'partner_mail_skipped') = 1, 'owner alert raised');
 update private.settings set value = '500' where key = 'global_sends_per_hour';

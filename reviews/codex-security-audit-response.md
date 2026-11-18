@@ -17,11 +17,11 @@ that performs the attack; the tests fail without the fix (checked by running the
 | 23 | Lowercasing before the ASCII check lets the Kelvin sign etc. become ASCII | ASCII-only check on the raw input, before lowercasing. | Deno audit #23 |
 | 25 | `check-site.sh` passes without `.htaccess` | Missing `.htaccess` now fails the site check. | Verified on a copy of `site/` without it |
 
-## Owner decision needed
+## Fixed after the owner's decision (migration 0009)
 
-| # | Finding | Proposal |
-|---|---|---|
-| 1 | Anyone can apply with someone else's email and take that address's one slot | Confirm the address before the application counts: the applicant gets a fixed "Confirm your application" email with a button; only then is the slot taken and the owner notified. Unconfirmed applications expire after 48 h and never block the real person. Changes what applicants see, so the owner decides. |
+| # | Finding | Fix | Proof |
+|---|---|---|---|
+| 1 | Anyone can apply with someone else's email and take that address's one slot | An application is stored as **pending**; the applicant gets ONE fixed "Confirm your application" email (token in the URL fragment, hash only in the database). Only `POST /partner-confirm` (Origin + Turnstile action `partner_confirm`, never on GET) confirms it; only then is the one-per-address slot used and the owner notified. A pending row never blocks the real person: a new application replaces the details and sends a new link (rate-limited: `resend_min_minutes`, max 3 links), and unconfirmed rows are deleted after 48 h. The separate "we received" email is gone (the confirm page says it), so each step is 1 email. | `test_10_partner_confirm.sql` (fake applicant replaced by the real one; guessed/expired/used/suppressed links refused; 3-link cap; expiry frees the address); race: 20 clicks on one link -> 1 confirmation; Deno: confirm route refusals, captcha actions not interchangeable, fixed email |
 
 ## Planned (before a specific event)
 

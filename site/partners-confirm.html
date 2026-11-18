@@ -1,0 +1,48 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <meta name="robots" content="noindex">
+  <link rel="icon" href="/assets/partners/icon.webp" type="image/webp">
+  <link rel="icon" href="/favicon-32.png" type="image/png" sizes="32x32">
+  <title>Confirm your application · Saigenai</title>
+  <link rel="preload" href="/assets/fonts/InterVariable.woff2" as="font" type="font/woff2" crossorigin>
+  <link rel="stylesheet" href="/assets/app.css">
+  <!-- No inline scripts, inline styles or inline event handlers: the CSP forbids them (that is the XSS defense). -->
+  <script src="/assets/config.js" defer></script>
+  <script src="/assets/partners-confirm.js" defer></script>
+  <script src="https://challenges.cloudflare.com/turnstile/v0/api.js?render=explicit" async defer></script>
+</head>
+<body class="sg">
+<div class="sg-bg" aria-hidden="true">
+<div class="sg-glow sg-glow-a"></div>
+<div class="sg-glow sg-glow-c"></div>
+</div>
+
+<div class="sg-wrap">
+  <header class="sg-head">
+    <a class="sg-brand" href="/partners"><img src="/assets/partners/icon.webp" alt="" width="40" height="40">Saigenai</a>
+  </header>
+
+  <main class="sg-confirm">
+    <!-- Opening this page changes NOTHING. Email security scanners open every link; only a person
+         pressing the button confirms. The token is in the #fragment, so it never reaches a server log. -->
+    <div class="sg-card sg-confirm-card">
+      <span class="sg-chip">CREATORS &amp; COACHES PROGRAM</span>
+      <h1>One last <em>step.</em></h1>
+      <p class="sg-lead">Confirm it's your email, and your application is in.</p>
+      <div id="pc-turnstile" class="ts"></div>
+      <button id="pc-confirm" class="sg-btn sg-solid sg-full" type="button" disabled>Confirm application</button>
+      <p id="pc-status" class="status" role="status" aria-live="polite"></p>
+    </div>
+  </main>
+
+  <footer class="sg-foot">
+    <span class="sg-foot-brand"><img src="/assets/partners/icon.webp" alt="" width="28" height="28"><span>© 2026 Saigenai · made by <a href="/">Creating in Public</a></span></span>
+    <span class="sg-foot-links"><a href="mailto:create@creatinginpublic.com">create@creatinginpublic.com</a><a href="/privacy">Privacy</a></span>
+  </footer>
+</div>
+</body>
+</html>

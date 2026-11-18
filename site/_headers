@@ -15,3 +15,5 @@
   Cache-Control: no-store
 /unsubscribe
   Cache-Control: no-store
+/partners-confirm
+  Cache-Control: no-store

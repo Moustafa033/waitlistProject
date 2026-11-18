@@ -35,7 +35,7 @@ function fakeFetch(opts: { rpc?: Record<string, unknown>; turnstile?: Record<str
       if (opts.turnstile === "down") throw new TypeError("network");
       const fd = init?.body as FormData;
       const resp = String(fd.get("response"));
-      const action = resp === "confirm-token" ? "waitlist_confirm" : resp.startsWith("partner-token") ? "partner_apply" : "waitlist_signup";
+      const action = resp === "confirm-token" ? "waitlist_confirm" : resp.startsWith("pconfirm-token") ? "partner_confirm" : resp.startsWith("partner-token") ? "partner_apply" : "waitlist_signup";
       return Response.json(opts.turnstile ?? { success: true, hostname: "waitlist.example.com", action });
     }
     if (url.includes("/rest/v1/rpc/")) {
@@ -45,7 +45,8 @@ function fakeFetch(opts: { rpc?: Record<string, unknown>; turnstile?: Record<str
         waitlist_confirm: { ok: true }, waitlist_unsubscribe: { ok: true }, waitlist_public_count: 1230,
         waitlist_send_failed: null, waitlist_suppress: null,
         waitlist_unsub_token: "U".repeat(43), waitlist_erase_by_token: { ok: true },
-        waitlist_partner_apply: { action: "send", id: "22222222-2222-4222-8222-222222222222", hour: "2026-11-18T10:00:00Z" },
+        waitlist_partner_apply: { action: "send", kind: "confirm", id: "22222222-2222-4222-8222-222222222222", token: "P".repeat(43), send_no: 1, hour: "2026-11-18T10:00:00Z" },
+        waitlist_partner_confirm: { ok: true, action: "send", id: "22222222-2222-4222-8222-222222222222", hour: "2026-11-18T10:00:00Z", email: "sara@example.com", name: "Sara Ali", handles: [{ platform: "tiktok", username: "@sara.fit" }], pitch: "Personal trainer, 20k followers. I can post 2 reviews a month." },
         waitlist_drain_partner_queue: { sends: [], left: 0, paused: false }, waitlist_partner_requeue: true,
       };
       return Response.json(opts.rpc?.[name] ?? def[name]);
@@ -433,43 +434,43 @@ Deno.test("config: CRON_SECRET must be long and header-safe; ALERT_TO must be a 
   }
 });
 
-// ------------------------------------------------------------------ partner applications (0006)
+
+// ------------------------------------------------------------------ partner applications (0006-0009)
 const cfgP: Config = { ...cfg, alertTo: "owner@example.com", mailReplyTo: "create@example.com" };
 const depsP = (f: typeof fetch, c: Config = cfgP) => ({ cfg: c, fetchFn: f, background: (p: Promise<unknown>) => { pending.push(p); } });
 const partnerBody = () => ({ name: "Sara Ali", email: " Sara@Example.com ", handles: [{ platform: "tiktok", username: "@sara.fit" }],
   pitch: "Personal trainer, 20k followers. I can post 2 reviews a month.", consent: true, age_18_plus: true,
   consent_version: "partners-v1", website: "", elapsed_ms: 9000, turnstile: "partner-token-xxxxxxxx" });
+const pconfirm = (t: unknown = "P".repeat(43), ts = "pconfirm-token-xxxxxxxx") => req("partner-confirm", { token: t, turnstile: ts });
 const mails = (calls: Call[]) => calls.filter((c) => c.url.startsWith("https://api.resend.com")).map((c) => ({
   key: (c.init!.headers as Record<string, string>)["idempotency-key"], ...JSON.parse(c.body!) }));
 const ZWSP = String.fromCodePoint(0x200b), RLO = String.fromCodePoint(0x202e);   // built from code points, never raw
+const PID = "22222222-2222-4222-8222-222222222222";
 
-Deno.test("partner happy path: Turnstile(partner_apply) first, one FIXED email to the applicant, details only to the owner", async () => {
+Deno.test("partner apply: Turnstile(partner_apply) first, then ONE fixed confirmation email; the owner is NOT told yet", async () => {
   const { f, calls } = fakeFetch();
   const res = await makeHandler(depsP(f))(req("partner", partnerBody()));
   eq(res.status, 202);
-  eq(await res.json(), { ok: true, message: "application_received" });
+  eq(await res.json(), { ok: true, message: "check_inbox" });
   await settle();
   const order = calls.map((c) => c.url.includes("cloudflare") ? "ts" : c.url.includes("rpc") ? c.url.split("/").pop() : "mail");
-  eq(order, ["ts", "waitlist_partner_apply", "mail", "mail"], "Turnstile before the database; exactly two emails");
+  eq(order, ["ts", "waitlist_partner_apply", "mail"], "Turnstile before the database; exactly ONE email");
   const args = JSON.parse(calls.find((c) => c.url.endsWith("/rpc/waitlist_partner_apply"))!.body!);
   eq(args.p_email, "sara@example.com");
-  eq(args.p_handles, [{ platform: "tiktok", username: "@sara.fit" }]);
-  const [ack, owner] = mails(calls);
-  eq(ack.to, ["sara@example.com"]);
-  eq(ack.subject, "We received your application");
-  eq(ack.key, "partner-ack/22222222-2222-4222-8222-222222222222");
-  eq(ack.reply_to, "create@example.com", "applicant replies reach the owner's mailbox");
+  const [m] = mails(calls);
+  eq(m.to, ["sara@example.com"]);
+  eq(m.subject, "Confirm your application");
+  eq(m.key, `partner-confirm/${PID}/1`);
+  eq(m.reply_to, "create@example.com");
+  assert(m.text.includes(`${ORIGIN}/partners-confirm#t=${"P".repeat(43)}`), "token in the fragment");
+  assert(m.html.includes(`href="${ORIGIN}/partners-confirm#t=${"P".repeat(43)}"`), "HTML button uses the fragment link");
   for (const typed of ["Sara", "sara.fit", "20k", "tiktok", "sara@example.com"]) {
-    assert(!(ack.subject + ack.text + ack.html).includes(typed), `applicant email must not echo visitor text: ${typed}`);
+    assert(!(m.subject + m.text + m.html).includes(typed), `confirmation email must not echo visitor text: ${typed}`);
   }
-  eq(owner.to, ["owner@example.com"]);
-  eq(owner.subject, "New partner application", "fixed subject: no visitor text in a header");
-  eq(owner.reply_to, "sara@example.com", "owner presses Reply to answer the applicant");
-  eq(owner.key, "partner-owner/22222222-2222-4222-8222-222222222222");
-  assert(owner.text.includes("Name (unverified): Sara Ali") && owner.text.includes("tiktok (unverified): @sara.fit"), "owner gets the details");
+  eq([...m.html.matchAll(/<img[^>]+src="([^"]+)"/g)].map((x) => x[1]), [`${ORIGIN}/email-logo.png`], "no tracking image");
 });
 
-Deno.test("the applicant email is byte-identical whatever the visitor typed (one standard email for everyone)", async () => {
+Deno.test("the confirmation email is byte-identical whatever the visitor typed (one standard email for everyone)", async () => {
   const run = async (extra: Record<string, unknown>) => {
     const { f, calls } = fakeFetch();
     await makeHandler(depsP(f))(req("partner", { ...partnerBody(), ...extra }));
@@ -477,38 +478,91 @@ Deno.test("the applicant email is byte-identical whatever the visitor typed (one
     const a = mails(calls)[0];
     return JSON.stringify([a.subject, a.text, a.html]);
   };
-  const base = await run({});
-  eq(await run({ name: "Buy Cheap Pills Now", pitch: "VISIT OUR SHOP FOR 90% OFF TODAY ONLY!!!" }), base, "spam text never reaches the applicant email");
+  eq(await run({ name: "Buy Cheap Pills Now", pitch: "VISIT OUR SHOP FOR 90% OFF TODAY ONLY!!!" }), await run({}), "spam text never reaches the applicant");
 });
 
-Deno.test("partner: owner email escapes HTML; visitor markup is shown as text", async () => {
+Deno.test("partner confirm: only via POST + Origin + Turnstile(partner_confirm); then the owner gets the details", async () => {
   const { f, calls } = fakeFetch();
-  await makeHandler(depsP(f))(req("partner", { ...partnerBody(), pitch: "<img src=x onerror=alert(1)> I make videos" }));
+  const h = makeHandler(depsP(f));
+  const r = await h(pconfirm());
+  eq(r.status, 200); eq(await r.json(), { ok: true });
   await settle();
-  const owner = mails(calls)[1];
-  assert(!owner.html.includes("<img"), "no live markup in the owner email");
-  assert(owner.html.includes("&lt;img src=x onerror=alert(1)&gt;"), "shown escaped");
+  const ts = calls.find((c) => c.url.includes("cloudflare"))!;
+  eq((ts.init!.body as FormData).get("response"), "pconfirm-token-xxxxxxxx");
+  eq(JSON.parse(calls.find((c) => c.url.endsWith("/rpc/waitlist_partner_confirm"))!.body!).p_token, "P".repeat(43));
+  const [owner] = mails(calls);
+  eq(owner.to, ["owner@example.com"]);
+  eq(owner.subject, "New partner application", "fixed subject: no visitor text in a header");
+  eq(owner.reply_to, "sara@example.com", "Reply answers the (now confirmed) applicant");
+  eq(owner.key, `partner-owner/${PID}`);
+  assert(owner.text.includes("Name (unverified): Sara Ali") && owner.text.includes("tiktok (unverified): @sara.fit"));
+  // refusals
+  eq((await h(new Request(`https://ref.supabase.co/functions/v1/waitlist/partner-confirm`))).status, 405, "GET never confirms (link scanners)");
+  eq((await h(req("partner-confirm", { token: "P".repeat(43), turnstile: "x" }, { origin: "https://evil.example", "content-type": "application/json" }))).status, 403);
+  eq((await h(pconfirm("P".repeat(43), "partner-token-xxxxxxxx"))).status, 400, "an APPLY captcha token cannot confirm");
+  eq((await h(pconfirm("P".repeat(43), "signup-token-xxxxxxxx"))).status, 400, "a waitlist captcha token cannot confirm");
+  eq((await h(req("partner-confirm", { token: "P".repeat(43), turnstile: "pconfirm-token-xxxxxxxx", extra: 1 }))).status, 400);
+  const { f: f2, calls: c2 } = fakeFetch();
+  eq(await (await makeHandler(depsP(f2))(pconfirm("short"))).json(), { ok: false }, "malformed token: refused before Turnstile and the database");
+  eq(c2.length, 0);
 });
 
-Deno.test("partner answers are byte-identical for new / already applied / suppressed / saved-without-mail / bot", async () => {
+Deno.test("partner confirm: invalid / expired / used token -> same {ok:false}, no email", async () => {
+  const { f, calls } = fakeFetch({ rpc: { waitlist_partner_confirm: { ok: false } } });
+  const r = await makeHandler(depsP(f))(pconfirm());
+  eq(await r.json(), { ok: false });
+  await settle();
+  eq(mails(calls).length, 0);
+});
+
+Deno.test("partner confirm: queued (cap full / paused) -> ok for the visitor, no email now", async () => {
+  const { f, calls } = fakeFetch({ rpc: { waitlist_partner_confirm: { ok: true, action: "queued" } } });
+  eq(await (await makeHandler(depsP(f))(pconfirm())).json(), { ok: true });
+  await settle();
+  eq(mails(calls).length, 0);
+});
+
+Deno.test("partner confirm: a stored row that breaks the form rules is never mailed; its unit is given back", async () => {
+  const { f, calls } = fakeFetch({ rpc: { waitlist_partner_confirm: { ok: true, action: "send", id: PID, hour: "2026-11-18T10:00:00Z",
+    email: "x@y.com\r\nBcc: a@b.com", name: "Sara", handles: [{ platform: "tiktok", username: "a" }], pitch: "long enough text" } } });
+  await makeHandler(depsP(f))(pconfirm());
+  await settle();
+  eq(mails(calls).length, 0);
+  eq(calls.filter((c) => c.url.endsWith("/rpc/waitlist_send_failed")).length, 1);
+});
+
+Deno.test("partner: owner email escapes HTML and marks every applicant field as unverified (audit #14)", async () => {
+  const { f, calls } = fakeFetch({ rpc: { waitlist_partner_confirm: { ok: true, action: "send", id: PID, hour: "2026-11-18T10:00:00Z",
+    email: "sara@example.com", name: "Sara Ali", handles: [{ platform: "tiktok", username: "@sara.fit" }],
+    pitch: "<img src=x onerror=alert(1)> Your account is locked, log in at evil dot example." } } });
+  await makeHandler(depsP(f))(pconfirm());
+  await settle();
+  const owner = mails(calls)[0];
+  assert(!owner.html.includes("<img"), "no live markup");
+  assert(owner.html.includes("&lt;img src=x onerror=alert(1)&gt;"), "shown escaped");
+  assert(owner.text.startsWith("New partner application") && owner.text.indexOf("UNVERIFIED") < owner.text.indexOf("Your account is locked"));
+  for (const label of ["Name (unverified):", "Email (unverified):", "tiktok (unverified):"]) assert(owner.text.includes(label), label);
+});
+
+Deno.test("partner apply answers are byte-identical for new / pending / applied / suppressed / limited / queued / bot", async () => {
   const bodies: string[] = [];
-  for (const r of [undefined, { action: "none", reason: "already_applied" }, { action: "none", reason: "suppressed" }, { action: "saved", reason: "send_cap" }]) {
+  for (const r of [undefined, { action: "none", reason: "already_applied" }, { action: "none", reason: "suppressed" },
+                   { action: "none", reason: "too_soon" }, { action: "none", reason: "address_cap" }, { action: "none", reason: "mailbox_cap" },
+                   { action: "saved", reason: "send_cap", queued: true }]) {
     const { f } = fakeFetch(r ? { rpc: { waitlist_partner_apply: r } } : {});
     const res = await makeHandler(depsP(f))(req("partner", partnerBody()));
     eq(res.status, 202); bodies.push(await res.text());
   }
   const { f, calls } = fakeFetch();
-  const bot = await makeHandler(depsP(f))(req("partner", { ...partnerBody(), website: "http://spam" }));
-  eq(bot.status, 202); bodies.push(await bot.text());
-  eq(calls.length, 0, "honeypot: nothing called at all");
-  const fast = await makeHandler(depsP(f))(req("partner", { ...partnerBody(), elapsed_ms: 300 }));
-  bodies.push(await fast.text());
+  bodies.push(await (await makeHandler(depsP(f))(req("partner", { ...partnerBody(), website: "http://spam" }))).text());
+  bodies.push(await (await makeHandler(depsP(f))(req("partner", { ...partnerBody(), elapsed_ms: 300 }))).text());
+  eq(calls.length, 0, "bot traps: nothing called at all");
   eq(new Set(bodies).size, 1, "every answer is the same");
   await settle();
 });
 
-Deno.test("partner: a repeat or suppressed address gets NO email", async () => {
-  for (const reason of ["already_applied", "suppressed"]) {
+Deno.test("partner: refused applications get NO email", async () => {
+  for (const reason of ["already_applied", "suppressed", "too_soon", "address_cap", "mailbox_cap"]) {
     const { f, calls } = fakeFetch({ rpc: { waitlist_partner_apply: { action: "none", reason } } });
     await makeHandler(depsP(f))(req("partner", partnerBody()));
     await settle();
@@ -546,91 +600,95 @@ Deno.test("partner refusals: origin, consent, age 18, version, extra keys, size,
   eq((await h()(req("partner", { ...partnerBody(), role: "admin" }))).status, 400, "unknown keys refused");
   eq((await h()(req("partner", JSON.stringify({ ...partnerBody(), pitch: "x".repeat(9000) })))).status, 413);
   eq((await h()(req("partner", { ...partnerBody(), turnstile: "signup-token-xxxxxxxx" }))).status, 400, "a signup captcha token cannot be reused here");
+  eq((await h()(req("partner", { ...partnerBody(), turnstile: "pconfirm-token-xxxxxxxx" }))).status, 400, "a confirm captcha token cannot apply");
   eq((await h()(req("partner", partnerBody(), {}, "GET"))).status, 405);
   const busy = await h({ rpc: { waitlist_partner_apply: { action: "none", reason: "busy" } } })(req("partner", partnerBody()));
   eq(busy.status, 429); eq((await busy.json()).error, "busy");
-  const stale = await h({ rpc: { waitlist_partner_apply: { action: "none", reason: "stale_consent_version" } } })(req("partner", partnerBody()));
-  eq(stale.status, 409);
+  eq((await h({ rpc: { waitlist_partner_apply: { action: "none", reason: "stale_consent_version" } } })(req("partner", partnerBody()))).status, 409);
   await settle();
 });
 
-Deno.test("partner: provider unreachable -> one send unit refunded per email that never left; visitor still sees 202", async () => {
+Deno.test("partner: provider unreachable -> unit refunded and the application requeued (nothing lost); 500 -> no refund", async () => {
   const { f, calls } = fakeFetch({ resend: "down" });
   eq((await makeHandler(depsP(f))(req("partner", partnerBody()))).status, 202);
   await settle();
-  eq(calls.filter((c) => c.url.endsWith("/rpc/waitlist_send_failed")).length, 2, "both units refunded");
+  eq(calls.filter((c) => c.url.endsWith("/rpc/waitlist_send_failed")).length, 1);
+  eq(calls.filter((c) => c.url.endsWith("/rpc/waitlist_partner_requeue")).map((c) => JSON.parse(c.body!).p_id), [PID]);
   const { f: f2, calls: c2 } = fakeFetch({ resend: 500 });
-  await makeHandler(depsP(f2))(req("partner", partnerBody()));
+  await makeHandler(depsP(f2))(pconfirm());
   await settle();
-  eq(c2.filter((c) => c.url.endsWith("/rpc/waitlist_send_failed")).length, 0, "provider answered (500) -> it may have sent: no refund");
+  eq(c2.filter((c) => c.url.endsWith("/rpc/waitlist_send_failed")).length, 0, "provider answered: it may have sent, no refund");
 });
 
-Deno.test("partner: without ALERT_TO only the applicant email goes out and the owner's unit is refunded", async () => {
+Deno.test("partner: without ALERT_TO a confirmed application sends nothing and its unit is refunded", async () => {
   const { f, calls } = fakeFetch();
-  await makeHandler(depsP(f, { ...cfgP, alertTo: undefined }))(req("partner", partnerBody()));
+  await makeHandler(depsP(f, { ...cfgP, alertTo: undefined }))(pconfirm());
   await settle();
-  eq(mails(calls).length, 1);
+  eq(mails(calls).length, 0);
   eq(calls.filter((c) => c.url.endsWith("/rpc/waitlist_send_failed")).length, 1);
 });
 
-// ------------------------------------------------------------------ 0007 partner mail queue
-const PROW = { id: "44444444-4444-4444-8444-444444444444", email: "queued.partner@example.com", name: "Omar K",
-  handles: [{ platform: "instagram", username: "omar.lifts" }], pitch: "Coach with a small but loyal community.", hour: "2026-11-18T11:00:00Z" };
-const cronP: Config = { ...cfgP, cronSecret: CRON };
-
-Deno.test("partner: live send with the provider down puts the application back in the queue (nothing lost)", async () => {
-  const { f, calls } = fakeFetch({ resend: "down" });
-  eq((await makeHandler(depsP(f))(req("partner", partnerBody()))).status, 202);
-  await settle();
-  eq(mails(calls).length, 1, "one attempt only: no second timeout once the provider is unreachable");
-  const rq = calls.filter((c) => c.url.endsWith("/rpc/waitlist_partner_requeue"));
-  eq(rq.length, 1);
-  eq(JSON.parse(rq[0].body!).p_id, "22222222-2222-4222-8222-222222222222");
+Deno.test("audit #15: a refused requeue (queue full) is logged, not silent", async () => {
+  const lines: string[] = [];
+  const orig = console.log;
+  console.log = (s: string) => { lines.push(String(s)); };
+  try {
+    const { f } = fakeFetch({ resend: "down", rpc: { waitlist_partner_requeue: false } });
+    await makeHandler(depsP(f))(req("partner", partnerBody()));
+    await settle();
+  } finally { console.log = orig; }
+  assert(lines.some((l) => l.includes('"requeue_failed"')), "requeue_failed is in the log");
 });
 
-Deno.test("drain: queued partner applications get BOTH emails, after the waitlist queue", async () => {
+// ------------------------------------------------------------------ partner mail queue (0007 + 0009)
+const cronP: Config = { ...cfgP, cronSecret: CRON };
+const QCONF = { kind: "confirm", id: "44444444-4444-4444-8444-444444444444", email: "queued.partner@example.com", token: "Q".repeat(43), send_no: 1, hour: "2026-11-18T11:00:00Z" };
+const QOWNER = { kind: "owner", id: "55555555-5555-4555-8555-555555555555", email: "omar@example.com", name: "Omar K",
+  handles: [{ platform: "instagram", username: "omar.lifts" }], pitch: "Coach with a small but loyal community.", hour: "2026-11-18T11:00:00Z" };
+
+Deno.test("drain: queued partner rows send ONE email each (confirmation link or owner notice), after the waitlist queue", async () => {
   const { f, calls } = fakeFetch({ rpc: { waitlist_drain_queue: { sends: [SEND], left: 0, paused: false },
-    waitlist_drain_partner_queue: { sends: [PROW], left: 3, paused: false }, waitlist_take_alerts: [] } });
+    waitlist_drain_partner_queue: { sends: [QCONF, QOWNER], left: 3, paused: false }, waitlist_take_alerts: [] } });
   const out = await (await makeHandler(depsP(f, cronP))(drainReq(CRON))).json();
   eq([out.sent, out.partner_sent, out.partner_failed, out.partner_left], [1, 2, 0, 3]);
   const m = mails(calls);
-  eq(m.map((x) => x.to[0]), ["queued@example.com", "queued.partner@example.com", "owner@example.com"], "waitlist first, then the partner pair");
-  eq(m[1].subject, "We received your application");
-  eq(m[1].key, "partner-ack/44444444-4444-4444-8444-444444444444", "same idempotency key as a live send: never delivered twice");
-  eq(m[2].reply_to, "queued.partner@example.com");
-  assert(m[2].text.includes("Name (unverified): Omar K"));
+  eq(m.map((x) => x.to[0]), ["queued@example.com", "queued.partner@example.com", "owner@example.com"], "waitlist first");
+  eq(m[1].subject, "Confirm your application");
+  assert(m[1].text.includes(`/partners-confirm#t=${"Q".repeat(43)}`));
+  eq(m[1].key, "partner-confirm/44444444-4444-4444-8444-444444444444/1");
+  eq(m[2].subject, "New partner application");
+  eq(m[2].reply_to, "omar@example.com");
 });
 
-Deno.test("drain: a partner row that breaks the form rules is never mailed", async () => {
-  const bad = [{ ...PROW, name: "Visit http://spam.example" }, { ...PROW, email: "x@y.com\r\nBcc: a@b.com" },
-               { ...PROW, handles: [{ platform: "tiktok", username: "https://evil" }] }, { ...PROW, id: "not-a-uuid" }];
+Deno.test("drain: a partner row that breaks the rules is never mailed", async () => {
+  const bad = [{ ...QOWNER, name: "Visit http://spam.example" }, { ...QCONF, email: "x@y.com\r\nBcc: a@b.com" }, { ...QCONF, token: "short" },
+               { ...QOWNER, handles: [{ platform: "tiktok", username: "https://evil" }] }, { ...QOWNER, id: "not-a-uuid" }, { ...QOWNER, kind: "other" }];
   const { f, calls } = fakeFetch({ rpc: { waitlist_drain_queue: { sends: [], left: 0, paused: false },
     waitlist_drain_partner_queue: { sends: bad, left: 0, paused: false }, waitlist_take_alerts: [] } });
   const out = await (await makeHandler(depsP(f, cronP))(drainReq(CRON))).json();
-  eq([out.partner_sent, out.partner_failed], [0, 8]);
+  eq([out.partner_sent, out.partner_failed], [0, 6]);
   eq(mails(calls).length, 0);
 });
 
-Deno.test("drain: provider down mid-run -> partner units refunded and EVERY row put back in the queue", async () => {
+Deno.test("drain: provider down mid-run -> units refunded and EVERY partner row put back in the queue", async () => {
+  const ids = ["44444444-4444-4444-8444-444444444444", "66666666-6666-4666-8666-666666666666", "77777777-7777-4777-8777-777777777777"];
   const { f, calls } = fakeFetch({ resend: "down", rpc: { waitlist_drain_queue: { sends: [], left: 0, paused: false },
-    waitlist_drain_partner_queue: { sends: [PROW, { ...PROW, id: "55555555-5555-4555-8555-555555555555" }, { ...PROW, id: "66666666-6666-4666-8666-666666666666" }], left: 0, paused: false },
-    waitlist_take_alerts: [] } });
+    waitlist_drain_partner_queue: { sends: ids.map((id) => ({ ...QCONF, id })), left: 0, paused: false }, waitlist_take_alerts: [] } });
   const out = await (await makeHandler(depsP(f, cronP))(drainReq(CRON))).json();
-  eq([out.partner_sent, out.partner_failed, out.partner_left], [0, 6, 3]);
+  eq([out.partner_sent, out.partner_failed, out.partner_left], [0, 3, 3]);
   eq(mails(calls).length, 1, "only ONE attempt at the provider");
-  eq(calls.filter((c) => c.url.endsWith("/rpc/waitlist_send_failed")).length, 6, "2 units back per application");
-  eq(calls.filter((c) => c.url.endsWith("/rpc/waitlist_partner_requeue")).map((c) => JSON.parse(c.body!).p_id),
-     [PROW.id, "55555555-5555-4555-8555-555555555555", "66666666-6666-4666-8666-666666666666"], "all three back in the queue");
+  eq(calls.filter((c) => c.url.endsWith("/rpc/waitlist_send_failed")).length, 3);
+  eq(calls.filter((c) => c.url.endsWith("/rpc/waitlist_partner_requeue")).map((c) => JSON.parse(c.body!).p_id), ids);
 });
 
 Deno.test("drain: provider already down for the waitlist -> the partner queue is not touched this run", async () => {
   const { f, calls } = fakeFetch({ resend: "down", rpc: { waitlist_drain_queue: { sends: [SEND], left: 0, paused: false },
-    waitlist_drain_partner_queue: { sends: [PROW], left: 1, paused: false }, waitlist_take_alerts: [] } });
+    waitlist_drain_partner_queue: { sends: [QCONF], left: 1, paused: false }, waitlist_take_alerts: [] } });
   await makeHandler(depsP(f, cronP))(drainReq(CRON));
-  eq(calls.filter((c) => c.url.endsWith("/rpc/waitlist_drain_partner_queue")).length, 0, "no rows taken out of the partner queue");
+  eq(calls.filter((c) => c.url.endsWith("/rpc/waitlist_drain_partner_queue")).length, 0);
 });
 
-// ------------------------------------------------------------------ 0008 / Codex audit fixes
+// ------------------------------------------------------------------ 0008 / Codex audit fixes (non-partner)
 Deno.test("audit #13: database on another consent version -> 409 reload_page, never a false 'check your inbox'", async () => {
   const { f, calls } = fakeFetch({ rpc: { waitlist_signup: { action: "none", reason: "stale_consent_version" } } });
   const r = await makeHandler(deps(f))(req("signup", goodBody()));
@@ -647,31 +705,7 @@ Deno.test("audit #12: 20 simultaneous /count requests on a cold cache start ONE 
   eq(calls.filter((c) => c.url.endsWith("/rpc/waitlist_public_count")).length, 1);
 });
 
-Deno.test("audit #23: letters that lowercase INTO ascii (Kelvin sign, dotted capital I) are refused, not folded", () => {
-  for (const cp of [0x212a, 0x0130, 0x017f]) {   // Kelvin sign, I with dot, long s
-    throwsCode(() => normalizeEmail(String.fromCodePoint(cp) + "ate@example.com"), "invalid_email");
-  }
+Deno.test("audit #23: letters that lowercase INTO ascii (Kelvin sign, dotted capital I, long s) are refused, not folded", () => {
+  for (const cp of [0x212a, 0x0130, 0x017f]) throwsCode(() => normalizeEmail(String.fromCodePoint(cp) + "ate@example.com"), "invalid_email");
   eq(normalizeEmail("  Kate@Example.com "), "kate@example.com", "plain ASCII still works");
-});
-
-Deno.test("audit #14: the owner email marks every applicant field as unverified", async () => {
-  const { f, calls } = fakeFetch();
-  await makeHandler(depsP(f))(req("partner", { ...partnerBody(), pitch: "Your account is locked, log in at evil dot example to fix it." }));
-  await settle();
-  const owner = mails(calls)[1];
-  assert(owner.text.startsWith("New partner application") && owner.text.includes("UNVERIFIED"), "warning first");
-  for (const label of ["Name (unverified):", "Email (unverified):", "tiktok (unverified):"]) assert(owner.text.includes(label), label);
-  assert(owner.text.indexOf("UNVERIFIED") < owner.text.indexOf("Your account is locked"), "the warning comes before the visitor text");
-});
-
-Deno.test("audit #15: a refused requeue (queue full) is logged, not silently counted as waiting", async () => {
-  const lines: string[] = [];
-  const orig = console.log;
-  console.log = (s: string) => { lines.push(String(s)); };
-  try {
-    const { f } = fakeFetch({ resend: "down", rpc: { waitlist_partner_requeue: false } });
-    await makeHandler(depsP(f))(req("partner", partnerBody()));
-    await settle();
-  } finally { console.log = orig; }
-  assert(lines.some((l) => l.includes('"requeue_failed"')), "requeue_failed is in the log");
 });

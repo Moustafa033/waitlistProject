@@ -545,3 +545,12 @@ select.sg-in option { color: #000; }
 
 /* must-know words: bold and bright, exactly like "get paid for it" in the first paragraph (no tag, no colour box) */
 mark.hl { padding: 0; background: none; color: var(--sg-txt, var(--fg)); font-weight: 700; }
+
+/* Saigenai "Confirm application" page (partners-confirm.html) */
+.sg-confirm { display: flex; align-items: center; justify-content: center; min-height: 62vh; padding: 24px 0 64px; }
+.sg-confirm-card { width: min(520px, 100%); padding: 40px 32px; display: flex; flex-direction: column; align-items: center; gap: 18px; text-align: center; }
+.sg-confirm-card .sg-chip { align-self: center; }
+.sg-confirm-card h1 { font-size: clamp(36px, 6vw, 52px); }
+.sg-confirm-card .sg-lead { font-size: 17px; }
+.sg-confirm-card .ts { justify-content: center; margin: 0; }
+.sg-confirm-card .status { margin: 0; color: var(--sg-txt); }

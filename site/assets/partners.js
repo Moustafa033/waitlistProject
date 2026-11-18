@@ -16,7 +16,7 @@
   // Output uses textContent only (no HTML-parsing sinks) => no DOM XSS.
   const say = (msg) => { status.textContent = msg; };
   const MESSAGES = {
-    application_received: "Thanks! We received your application. Check your inbox for our email.",
+    check_inbox: "Almost done! Check your inbox and press the button in our email to confirm your application.",
     invalid_email: "Please enter a valid email address.",
     use_another_email: "Please use a permanent email address.",
     invalid_fields: "Please check your name, usernames (letters, numbers, . _ - only) and the text (10 to 1,000 characters).",
@@ -84,7 +84,7 @@
         }),
       });
       const data = await res.json().catch(() => ({}));
-      if (res.status === 202) { form.reset(); sent = true; say(MESSAGES.application_received); }
+      if (res.status === 202) { form.reset(); sent = true; say(MESSAGES.check_inbox); }
       else say(MESSAGES[data.error] || MESSAGES.try_later);
     } catch {
       say(MESSAGES.try_later);
