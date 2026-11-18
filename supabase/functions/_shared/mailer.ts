@@ -1,5 +1,6 @@
 // Outgoing email. No user-controlled text is ever placed in a header, subject or
 // body (only our own link with a random token), so there is nothing to inject.
+// One exception: partnerOwnerMail() carries the application text, and it goes ONLY to the owner.
 import type { Config } from "./env.ts";
 
 export class ProviderNotReached extends Error {}
@@ -11,10 +12,13 @@ export interface Mail {
   html: string;
   headers?: Record<string, string>;
   idempotencyKey: string;
+  /** Overrides MAIL_REPLY_TO (owner notices: "Reply" goes to the applicant). Must be a validated address. */
+  replyTo?: string;
 }
 
 export async function sendMail(cfg: Config, m: Mail, fetchFn: typeof fetch = fetch): Promise<void> {
-  if (/[\r\n]/.test(m.to + m.subject + Object.values(m.headers ?? {}).join(""))) throw new Error("header injection blocked");
+  if (/[\r\n]/.test(m.to + m.subject + (m.replyTo ?? "") + Object.values(m.headers ?? {}).join(""))) throw new Error("header injection blocked");
+  const replyTo = m.replyTo ?? cfg.mailReplyTo;
   let res: Response;
   try {
     res = await fetchFn("https://api.resend.com/emails", {
@@ -25,7 +29,7 @@ export async function sendMail(cfg: Config, m: Mail, fetchFn: typeof fetch = fet
         "idempotency-key": m.idempotencyKey,   // a retry never sends a second copy
       },
       body: JSON.stringify({ from: cfg.mailFrom, to: [m.to], subject: m.subject, text: m.text, html: m.html, headers: m.headers,
-        ...(cfg.mailReplyTo ? { reply_to: cfg.mailReplyTo } : {}) }),   // replies land in the owner's real mailbox
+        ...(replyTo ? { reply_to: replyTo } : {}) }),   // replies land in the owner's real mailbox
       signal: AbortSignal.timeout(8000),
     });
   } catch {
@@ -118,6 +122,7 @@ const ALERT_TEXT: Record<string, string> = {
   queue_full: "The waiting queue was full (some people could not be queued)",
   paused_signups: "Sending is paused and people are signing up (they are queued)",
   auto_paused: "SENDING WAS PAUSED AUTOMATICALLY: bounce or spam-complaint spike",
+  partner_mail_skipped: "Partner applications were saved WITHOUT emails (send cap full or paused): read them in private.partner_applications",
 };
 export async function alertMail(_cfg: Config, to: string, alerts: Alert[], queued: number, paused: boolean): Promise<Mail> {
   const known = alerts.filter((a) => a.kind in ALERT_TEXT);
@@ -139,5 +144,66 @@ export async function alertMail(_cfg: Config, to: string, alerts: Alert[], queue
     text,
     html: `<pre style="font-family:monospace;font-size:13px">${esc(text)}</pre>`,
     idempotencyKey: `alert/${Array.from(digest.slice(0, 16), (b) => b.toString(16).padStart(2, "0")).join("")}`,
+  };
+}
+
+// ---------------------------------------------------------------- partner applications
+const ACK_TEXT = "Thanks for applying to work with Creating in Public. We'll review your application and get in touch as soon as possible.";
+const ACK_IGNORE = "Didn't apply? Just ignore this email. You won't hear from us again.";
+
+/** The ONE standard email every applicant gets. Fixed text only: nothing the visitor typed
+ *  (not even their name) is ever put in it, so the form cannot be used to send spam. */
+export function partnerAckMail(cfg: Config, to: string, id: string): Mail {
+  const font = "-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif";
+  const logo = `${esc(cfg.siteOrigin)}/email-logo.png`;
+  return {
+    to,
+    subject: "We received your application",
+    text: `We received your application\n\n${ACK_TEXT}\n\n${ACK_IGNORE}\n\nCreating in Public`,
+    html: `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="color-scheme" content="light"><title>We received your application</title></head>
+<body style="margin:0;padding:0;background:#f4f4f3;">
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="background:#f4f4f3;"><tr><td align="center" style="padding:32px 16px;">
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="max-width:480px;background:#ffffff;border:1px solid #ececea;border-radius:14px;">
+<tr><td style="padding:28px 26px;font-family:${font};color:#111111;">
+<table role="presentation" cellpadding="0" cellspacing="0" border="0"><tr>
+<td style="padding-right:8px;vertical-align:middle;"><img src="${logo}" width="20" height="20" alt="" style="display:block;border:0;"></td>
+<td style="vertical-align:middle;font-size:15px;font-weight:600;letter-spacing:-0.2px;color:#111111;">Creating in Public</td>
+</tr></table>
+<h1 style="margin:22px 0 0;font-size:24px;line-height:1.2;font-weight:700;letter-spacing:-0.6px;color:#111111;">We received your application</h1>
+<div style="margin:8px 0 16px;width:150px;height:3px;border-radius:3px;background-color:#8f7cf0;background-image:linear-gradient(90deg,#ff8a3d,#6b7bff);line-height:3px;font-size:0;">&nbsp;</div>
+<p style="margin:0;font-size:15px;line-height:1.55;color:#2b2b2b;">${esc(ACK_TEXT)}</p>
+<p style="margin:22px 0 0;padding-top:14px;border-top:1px solid #ececea;font-size:12px;line-height:1.5;color:#6b6b6b;">${esc(ACK_IGNORE)}</p>
+</td></tr></table>
+</td></tr></table>
+</body></html>`,
+    idempotencyKey: `partner-ack/${id}`,
+  };
+}
+
+export interface PartnerApp { email: string; name: string; handles: { platform: string; username: string }[]; pitch: string }
+
+/** Owner notice with the application. The ONLY email that carries visitor text: it goes only to the
+ *  owner, the subject is fixed, the text is plain and HTML-escaped. "Reply" answers the applicant. */
+export function partnerOwnerMail(to: string, id: string, a: PartnerApp): Mail {
+  const text = [
+    "New partner application (Creating in Public).",
+    "The lines below were typed by the applicant: do not open links you do not trust.",
+    "",
+    `Name: ${a.name}`,
+    `Email: ${a.email}`,
+    ...a.handles.map((h) => `${h.platform}: ${h.username}`),
+    "",
+    "What they can do:",
+    a.pitch,
+    "",
+    "Press Reply to answer the applicant.",
+  ].join("\n");
+  return {
+    to,
+    subject: "New partner application",
+    text,
+    html: `<pre style="font-family:monospace;font-size:13px;white-space:pre-wrap">${esc(text)}</pre>`,
+    idempotencyKey: `partner-owner/${id}`,
+    replyTo: a.email,
   };
 }

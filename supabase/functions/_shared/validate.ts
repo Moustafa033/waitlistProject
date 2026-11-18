@@ -53,3 +53,35 @@ export function isToken(v: unknown): v is string {
 export function isUuid(v: unknown): v is string {
   return typeof v === "string" && /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(v);
 }
+
+// ---------------------------------------------------------------- partner form (same rules as SQL 0006)
+export const PLATFORMS = ["instagram", "tiktok", "youtube", "x", "facebook", "snapchat", "other"] as const;
+export interface Handle { platform: string; username: string }
+
+/** Name: 1..80 characters, any language, no links/emails/markup, nothing hidden. Refused, never cleaned. */
+export function partnerName(raw: unknown): string {
+  if (typeof raw !== "string" || HIDDEN_OR_CONTROL.test(raw)) throw new HttpError(400, "invalid_fields");
+  const v = raw.trim();
+  if (v.length < 1 || v.length > 80 || /[<>@/\:;{}[\]|`$*=]/.test(v) || /www\.|https?/i.test(v)) throw new HttpError(400, "invalid_fields");
+  return v;
+}
+
+/** 1..3 social accounts: a known platform + a plain username (optional leading @). */
+export function partnerHandles(raw: unknown): Handle[] {
+  if (!Array.isArray(raw) || raw.length < 1 || raw.length > 3) throw new HttpError(400, "invalid_fields");
+  return raw.map((h) => {
+    if (typeof h !== "object" || h === null || Array.isArray(h) || Object.keys(h).length !== 2) throw new HttpError(400, "invalid_fields");
+    const { platform, username } = h as Record<string, unknown>;
+    if (typeof platform !== "string" || !(PLATFORMS as readonly string[]).includes(platform)) throw new HttpError(400, "invalid_fields");
+    if (typeof username !== "string" || !/^@?[A-Za-z0-9._-]{1,50}$/.test(username)) throw new HttpError(400, "invalid_fields");
+    return { platform, username };
+  });
+}
+
+/** "What can you do?": 10..1000 characters, line breaks allowed (CRLF -> LF), nothing else hidden. */
+export function partnerPitch(raw: unknown): string {
+  if (typeof raw !== "string") throw new HttpError(400, "invalid_fields");
+  const v = raw.replace(/\r\n/g, "\n").trim();
+  if (v.length < 10 || v.length > 1000 || HIDDEN_OR_CONTROL.test(v.replace(/\n/g, ""))) throw new HttpError(400, "invalid_fields");
+  return v;
+}

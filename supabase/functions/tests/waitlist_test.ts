@@ -34,7 +34,8 @@ function fakeFetch(opts: { rpc?: Record<string, unknown>; turnstile?: Record<str
     if (url.includes("challenges.cloudflare.com")) {
       if (opts.turnstile === "down") throw new TypeError("network");
       const fd = init?.body as FormData;
-      const action = fd.get("response") === "confirm-token" ? "waitlist_confirm" : "waitlist_signup";
+      const resp = String(fd.get("response"));
+      const action = resp === "confirm-token" ? "waitlist_confirm" : resp.startsWith("partner-token") ? "partner_apply" : "waitlist_signup";
       return Response.json(opts.turnstile ?? { success: true, hostname: "waitlist.example.com", action });
     }
     if (url.includes("/rest/v1/rpc/")) {
@@ -44,6 +45,7 @@ function fakeFetch(opts: { rpc?: Record<string, unknown>; turnstile?: Record<str
         waitlist_confirm: { ok: true }, waitlist_unsubscribe: { ok: true }, waitlist_public_count: 1230,
         waitlist_send_failed: null, waitlist_suppress: null,
         waitlist_unsub_token: "U".repeat(43), waitlist_erase_by_token: { ok: true },
+        waitlist_partner_apply: { action: "send", id: "22222222-2222-4222-8222-222222222222", hour: "2026-11-18T10:00:00Z" },
       };
       return Response.json(opts.rpc?.[name] ?? def[name]);
     }
@@ -428,4 +430,144 @@ Deno.test("config: CRON_SECRET must be long and header-safe; ALERT_TO must be a 
     try { loadConfig((n) => (n === k ? v : base[n])); } catch (e) { threw = e instanceof ConfigError; }
     assert(threw, `${k}=${JSON.stringify(v)} must be refused`);
   }
+});
+
+// ------------------------------------------------------------------ partner applications (0006)
+const cfgP: Config = { ...cfg, alertTo: "owner@example.com", mailReplyTo: "create@example.com" };
+const depsP = (f: typeof fetch, c: Config = cfgP) => ({ cfg: c, fetchFn: f, background: (p: Promise<unknown>) => { pending.push(p); } });
+const partnerBody = () => ({ name: "Sara Ali", email: " Sara@Example.com ", handles: [{ platform: "tiktok", username: "@sara.fit" }],
+  pitch: "Personal trainer, 20k followers. I can post 2 reviews a month.", consent: true, age_18_plus: true,
+  consent_version: "partners-v1", website: "", elapsed_ms: 9000, turnstile: "partner-token-xxxxxxxx" });
+const mails = (calls: Call[]) => calls.filter((c) => c.url.startsWith("https://api.resend.com")).map((c) => ({
+  key: (c.init!.headers as Record<string, string>)["idempotency-key"], ...JSON.parse(c.body!) }));
+const ZWSP = String.fromCodePoint(0x200b), RLO = String.fromCodePoint(0x202e);   // built from code points, never raw
+
+Deno.test("partner happy path: Turnstile(partner_apply) first, one FIXED email to the applicant, details only to the owner", async () => {
+  const { f, calls } = fakeFetch();
+  const res = await makeHandler(depsP(f))(req("partner", partnerBody()));
+  eq(res.status, 202);
+  eq(await res.json(), { ok: true, message: "application_received" });
+  await settle();
+  const order = calls.map((c) => c.url.includes("cloudflare") ? "ts" : c.url.includes("rpc") ? c.url.split("/").pop() : "mail");
+  eq(order, ["ts", "waitlist_partner_apply", "mail", "mail"], "Turnstile before the database; exactly two emails");
+  const args = JSON.parse(calls.find((c) => c.url.endsWith("/rpc/waitlist_partner_apply"))!.body!);
+  eq(args.p_email, "sara@example.com");
+  eq(args.p_handles, [{ platform: "tiktok", username: "@sara.fit" }]);
+  const [ack, owner] = mails(calls);
+  eq(ack.to, ["sara@example.com"]);
+  eq(ack.subject, "We received your application");
+  eq(ack.key, "partner-ack/22222222-2222-4222-8222-222222222222");
+  eq(ack.reply_to, "create@example.com", "applicant replies reach the owner's mailbox");
+  for (const typed of ["Sara", "sara.fit", "20k", "tiktok", "sara@example.com"]) {
+    assert(!(ack.subject + ack.text + ack.html).includes(typed), `applicant email must not echo visitor text: ${typed}`);
+  }
+  eq(owner.to, ["owner@example.com"]);
+  eq(owner.subject, "New partner application", "fixed subject: no visitor text in a header");
+  eq(owner.reply_to, "sara@example.com", "owner presses Reply to answer the applicant");
+  eq(owner.key, "partner-owner/22222222-2222-4222-8222-222222222222");
+  assert(owner.text.includes("Name: Sara Ali") && owner.text.includes("tiktok: @sara.fit"), "owner gets the details");
+});
+
+Deno.test("the applicant email is byte-identical whatever the visitor typed (one standard email for everyone)", async () => {
+  const run = async (extra: Record<string, unknown>) => {
+    const { f, calls } = fakeFetch();
+    await makeHandler(depsP(f))(req("partner", { ...partnerBody(), ...extra }));
+    await settle();
+    const a = mails(calls)[0];
+    return JSON.stringify([a.subject, a.text, a.html]);
+  };
+  const base = await run({});
+  eq(await run({ name: "Buy Cheap Pills Now", pitch: "VISIT OUR SHOP FOR 90% OFF TODAY ONLY!!!" }), base, "spam text never reaches the applicant email");
+});
+
+Deno.test("partner: owner email escapes HTML; visitor markup is shown as text", async () => {
+  const { f, calls } = fakeFetch();
+  await makeHandler(depsP(f))(req("partner", { ...partnerBody(), pitch: "<img src=x onerror=alert(1)> I make videos" }));
+  await settle();
+  const owner = mails(calls)[1];
+  assert(!owner.html.includes("<img"), "no live markup in the owner email");
+  assert(owner.html.includes("&lt;img src=x onerror=alert(1)&gt;"), "shown escaped");
+});
+
+Deno.test("partner answers are byte-identical for new / already applied / suppressed / saved-without-mail / bot", async () => {
+  const bodies: string[] = [];
+  for (const r of [undefined, { action: "none", reason: "already_applied" }, { action: "none", reason: "suppressed" }, { action: "saved", reason: "send_cap" }]) {
+    const { f } = fakeFetch(r ? { rpc: { waitlist_partner_apply: r } } : {});
+    const res = await makeHandler(depsP(f))(req("partner", partnerBody()));
+    eq(res.status, 202); bodies.push(await res.text());
+  }
+  const { f, calls } = fakeFetch();
+  const bot = await makeHandler(depsP(f))(req("partner", { ...partnerBody(), website: "http://spam" }));
+  eq(bot.status, 202); bodies.push(await bot.text());
+  eq(calls.length, 0, "honeypot: nothing called at all");
+  const fast = await makeHandler(depsP(f))(req("partner", { ...partnerBody(), elapsed_ms: 300 }));
+  bodies.push(await fast.text());
+  eq(new Set(bodies).size, 1, "every answer is the same");
+  await settle();
+});
+
+Deno.test("partner: a repeat or suppressed address gets NO email", async () => {
+  for (const reason of ["already_applied", "suppressed"]) {
+    const { f, calls } = fakeFetch({ rpc: { waitlist_partner_apply: { action: "none", reason } } });
+    await makeHandler(depsP(f))(req("partner", partnerBody()));
+    await settle();
+    eq(mails(calls).length, 0, reason);
+  }
+});
+
+Deno.test("partner refusals: bad fields never reach Turnstile or the database", async () => {
+  const bad: Record<string, unknown>[] = [
+    { name: "Visit http://spam.example" }, { name: "www.spam.com" }, { name: "a@b.com" }, { name: "x".repeat(81) }, { name: "" },
+    { name: "Sara" + ZWSP + "Ali" }, { name: "Sara" + RLO + "ilA" },
+    { handles: [] }, { handles: "tiktok" }, { handles: [{ platform: "myspace", username: "a" }] },
+    { handles: [{ platform: "tiktok", username: "https://evil.example" }] }, { handles: [{ platform: "tiktok", username: "a", x: 1 }] },
+    { handles: [1, 2, 3, 4].map((i) => ({ platform: "x", username: "u" + i })) },
+    { pitch: "short" }, { pitch: "x".repeat(1001) }, { pitch: "hello there" + ZWSP + " friend" },
+  ];
+  for (const b of bad) {
+    const { f, calls } = fakeFetch();
+    const r = await makeHandler(depsP(f))(req("partner", { ...partnerBody(), ...b }));
+    eq(r.status, 400, JSON.stringify(b).slice(0, 60));
+    eq((await r.json()).error, "invalid_fields");
+    eq(calls.length, 0, "refused before any outside call");
+  }
+});
+
+Deno.test("partner refusals: origin, consent, age 18, version, extra keys, size, captcha action, daily cap", async () => {
+  const h = (o = {}) => makeHandler(depsP(fakeFetch(o).f));
+  eq((await h()(req("partner", partnerBody(), { origin: "https://evil.example", "content-type": "application/json" }))).status, 403);
+  eq((await h()(req("partner", { ...partnerBody(), consent: false }))).status, 400);
+  eq((await h()(req("partner", { ...partnerBody(), consent: "true" }))).status, 400, "only literal true");
+  eq((await h()(req("partner", { ...partnerBody(), age_18_plus: false }))).status, 400);
+  const { age_18_plus: _drop, ...no18 } = partnerBody();
+  eq((await h()(req("partner", { ...no18, age_16_plus: true }))).status, 400, "the waitlist's 16+ box does not count");
+  eq((await h()(req("partner", { ...partnerBody(), consent_version: "waitlist-v4" }))).status, 409);
+  eq((await h()(req("partner", { ...partnerBody(), role: "admin" }))).status, 400, "unknown keys refused");
+  eq((await h()(req("partner", JSON.stringify({ ...partnerBody(), pitch: "x".repeat(9000) })))).status, 413);
+  eq((await h()(req("partner", { ...partnerBody(), turnstile: "signup-token-xxxxxxxx" }))).status, 400, "a signup captcha token cannot be reused here");
+  eq((await h()(req("partner", partnerBody(), {}, "GET"))).status, 405);
+  const busy = await h({ rpc: { waitlist_partner_apply: { action: "none", reason: "busy" } } })(req("partner", partnerBody()));
+  eq(busy.status, 429); eq((await busy.json()).error, "busy");
+  const stale = await h({ rpc: { waitlist_partner_apply: { action: "none", reason: "stale_consent_version" } } })(req("partner", partnerBody()));
+  eq(stale.status, 409);
+  await settle();
+});
+
+Deno.test("partner: provider unreachable -> one send unit refunded per email that never left; visitor still sees 202", async () => {
+  const { f, calls } = fakeFetch({ resend: "down" });
+  eq((await makeHandler(depsP(f))(req("partner", partnerBody()))).status, 202);
+  await settle();
+  eq(calls.filter((c) => c.url.endsWith("/rpc/waitlist_send_failed")).length, 2, "both units refunded");
+  const { f: f2, calls: c2 } = fakeFetch({ resend: 500 });
+  await makeHandler(depsP(f2))(req("partner", partnerBody()));
+  await settle();
+  eq(c2.filter((c) => c.url.endsWith("/rpc/waitlist_send_failed")).length, 0, "provider answered (500) -> it may have sent: no refund");
+});
+
+Deno.test("partner: without ALERT_TO only the applicant email goes out and the owner's unit is refunded", async () => {
+  const { f, calls } = fakeFetch();
+  await makeHandler(depsP(f, { ...cfgP, alertTo: undefined }))(req("partner", partnerBody()));
+  await settle();
+  eq(mails(calls).length, 1);
+  eq(calls.filter((c) => c.url.endsWith("/rpc/waitlist_send_failed")).length, 1);
 });

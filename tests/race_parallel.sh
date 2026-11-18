@@ -44,3 +44,15 @@ echo "ok   10 drains + 30 re-signups at once -> no deadlock, no error"
 check "$($PG -c "select count(*) from private.signups where email like 'drain-%' and confirm_sends <> 1")" 0 "every queued person got exactly ONE email"
 $PG -c "set role service_role; select public.waitlist_drain_queue()" >/dev/null
 check "$($PG -c "select count(*) from private.send_queue")" 0 "queue is empty after one more drain"
+
+# 0006) partner applications under real concurrency
+$PG -c "update private.settings set value='20' where key='partner_per_day'; update private.settings set value='500' where key='global_sends_per_hour'; update private.settings set value='100000' where key='global_sends_per_day'; delete from private.counters; delete from private.partner_applications;" >/dev/null
+P="'Sara Ali', '[{\"platform\":\"tiktok\",\"username\":\"sara\"}]'::jsonb, 'Personal trainer, 2 reviews a month.', 'partners-v1'"
+res=$(race 30 "select public.waitlist_partner_apply('one-victim@example.com', $P)->>'action'")
+check "$(grep -c '^send$' <<<"$res" || true)" 1 "30 simultaneous applications from ONE address -> exactly 1 accepted"
+check "$($PG -c "select count(*) from private.partner_applications where email='one-victim@example.com'")" 1 "exactly one stored application"
+check "$($PG -c "select used from private.counters where bucket='send_hour'")" 2 "exactly 2 emails' worth of send units (applicant + owner)"
+$PG -c "delete from private.counters where bucket='partner_day'" >/dev/null
+res=$(race 40 "select public.waitlist_partner_apply('many-:i@example.com', $P)->>'action'")
+check "$(grep -c '^send$' <<<"$res" || true)" 20 "40 simultaneous different addresses vs daily cap 20 -> exactly 20"
+check "$($PG -c "select count(*) from private.partner_applications where email like 'many-%'")" 20 "exactly 20 stored"

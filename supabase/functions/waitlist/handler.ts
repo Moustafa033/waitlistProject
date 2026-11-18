@@ -1,6 +1,7 @@
 // The ONE public endpoint of the waitlist (deployed with verify_jwt = false,
 // because visitors have no account). Everything it does is bounded:
 //   POST /signup       browser only (exact Origin) + Turnstile + honeypot + validation
+//   POST /partner      "Work with us" application: same protections, one per address ever
 //   POST /confirm      browser only, called by the explicit "Confirm" button (never on GET)
 //   POST /unsubscribe  RFC 8058 one-click (mail providers, no Origin) or our page
 //   GET  /count        coarse public counter, cacheable
@@ -11,10 +12,10 @@
 // feedback that teaches a bot what worked).
 import type { Config } from "../_shared/env.ts";
 import { corsHeaders, decodeUtf8, HttpError, json, log, onlyKeys, parseJsonObject, readBodyCapped, requireOrigin } from "../_shared/http.ts";
-import { isDisposable, isToken, isUuid, normalizeEmail } from "../_shared/validate.ts";
+import { isDisposable, isToken, isUuid, normalizeEmail, partnerHandles, partnerName, partnerPitch } from "../_shared/validate.ts";
 import { verifyTurnstile } from "../_shared/turnstile.ts";
 import { rpc } from "../_shared/db.ts";
-import { alertMail, type Alert, confirmationMail, ProviderNotReached, sendMail } from "../_shared/mailer.ts";
+import { alertMail, type Alert, confirmationMail, partnerAckMail, partnerOwnerMail, ProviderNotReached, sendMail } from "../_shared/mailer.ts";
 import { safeEqual } from "../_shared/svix.ts";
 import { DISPOSABLE } from "../_shared/disposable.ts";
 
@@ -86,6 +87,50 @@ export function makeHandler(d: Deps): (req: Request) => Promise<Response> {
   function accepted(reason: string): Response {
     log("waitlist.signup", 202, reason);   // reason is internal metrics only
     return json(202, ACCEPTED, cors);
+  }
+
+  // "Work with us" (site/partners.html). Same protections as signup. One application per address,
+  // ever (the database decides). The visitor gets the SAME 202 for new / already applied / suppressed /
+  // bot, so the form never tells anyone whether an address applied. Only "busy" (the site-wide daily
+  // cap) is said out loud: it reveals nothing about any person.
+  const PARTNER_OK = { ok: true, message: "application_received" } as const;
+  async function partner(req: Request): Promise<Response> {
+    requireOrigin(req, cfg.siteOrigin);
+    if (!(req.headers.get("content-type") ?? "").startsWith("application/json")) throw new HttpError(415, "invalid_body");
+    const body = parseJsonObject(await readBodyCapped(req, 8192));
+    onlyKeys(body, ["email", "name", "handles", "pitch", "consent", "age_18_plus", "consent_version", "website", "elapsed_ms", "turnstile"]);
+    const done = (reason: string) => { log("waitlist.partner", 202, reason); return json(202, PARTNER_OK, cors); };
+
+    if (typeof body.website === "string" && body.website !== "") return done("honeypot");
+    if (typeof body.elapsed_ms !== "number" || body.elapsed_ms < cfg.minFillMs) return done("too_fast");
+    if (body.consent !== true || body.age_18_plus !== true) throw new HttpError(400, "consent_required");
+    if (typeof body.consent_version !== "string" || !/^partners-v[0-9]{1,3}$/.test(body.consent_version)) throw new HttpError(409, "reload_page");
+
+    const email = normalizeEmail(body.email);
+    if (isDisposable(email, DISPOSABLE)) throw new HttpError(400, "use_another_email");
+    const app = { email, name: partnerName(body.name), handles: partnerHandles(body.handles), pitch: partnerPitch(body.pitch) };
+
+    await verifyTurnstile(body.turnstile, { secret: cfg.turnstileSecret, hostnames: cfg.turnstileHostnames, action: "partner_apply", fetchFn: d.fetchFn });
+
+    const r = await rpc<{ action: string; reason?: string; id?: string; hour?: string }>(cfg, "waitlist_partner_apply",
+      { p_email: email, p_name: app.name, p_handles: app.handles, p_pitch: app.pitch, p_consent_version: body.consent_version }, d.fetchFn);
+    if (r.action === "none" && r.reason === "stale_consent_version") throw new HttpError(409, "reload_page");
+    if (r.action === "none" && r.reason === "invalid_fields") throw new HttpError(400, "invalid_fields");
+    if (r.action === "none" && r.reason === "busy") throw new HttpError(429, "busy");
+
+    if (r.action === "send" && r.id && isUuid(r.id) && r.hour) {
+      const { id, hour } = r;
+      d.background((async () => {
+        // the two send units were taken by the database; give one back for every email that never reached the provider
+        const refund = () => rpc(cfg, "waitlist_send_failed", { p_hour: hour }, d.fetchFn).catch(() => {});
+        try { await sendMail(cfg, partnerAckMail(cfg, email, id), d.fetchFn); log("waitlist.partner_mail", 200, "ack_sent"); }
+        catch (e) { if (e instanceof ProviderNotReached) await refund(); log("waitlist.partner_mail", 500, "ack_failed"); }
+        if (!cfg.alertTo) { await refund(); return; }   // no owner inbox configured: the application is in the database
+        try { await sendMail(cfg, partnerOwnerMail(cfg.alertTo, id, app), d.fetchFn); log("waitlist.partner_mail", 200, "owner_sent"); }
+        catch (e) { if (e instanceof ProviderNotReached) await refund(); log("waitlist.partner_mail", 500, "owner_failed"); }
+      })());
+    }
+    return done(r.action === "send" ? "sent" : (r.reason ?? r.action));
   }
 
   async function confirm(req: Request): Promise<Response> {
@@ -188,7 +233,7 @@ export function makeHandler(d: Deps): (req: Request) => Promise<Response> {
   return async (req: Request): Promise<Response> => {
     const url = new URL(req.url);
     const last = url.pathname.replace(/\/+$/, "").split("/").pop() ?? "";
-    const route = ["signup", "confirm", "unsubscribe", "erase", "count", "drain"].includes(last) ? last : "unknown"; // never log raw paths
+    const route = ["signup", "partner", "confirm", "unsubscribe", "erase", "count", "drain"].includes(last) ? last : "unknown"; // never log raw paths
     try {
       if (req.method === "OPTIONS") {
         // preflight only for our own site; others get no CORS grant
@@ -197,6 +242,7 @@ export function makeHandler(d: Deps): (req: Request) => Promise<Response> {
       if (route === "count" && req.method === "GET") return await count();
       if (req.method !== "POST") throw new HttpError(405, "method_not_allowed");  // GET never changes state
       if (route === "signup") return await signup(req);
+      if (route === "partner") return await partner(req);
       if (route === "confirm") return await confirm(req);
       if (route === "unsubscribe") return await unsubscribe(req, url);
       if (route === "erase") return await erase(req);
