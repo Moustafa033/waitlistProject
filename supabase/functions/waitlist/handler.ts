@@ -15,7 +15,7 @@ import { corsHeaders, decodeUtf8, HttpError, json, log, onlyKeys, parseJsonObjec
 import { isDisposable, isToken, isUuid, normalizeEmail, partnerHandles, partnerName, partnerPitch } from "../_shared/validate.ts";
 import { verifyTurnstile } from "../_shared/turnstile.ts";
 import { rpc } from "../_shared/db.ts";
-import { alertMail, type Alert, confirmationMail, partnerAckMail, partnerOwnerMail, ProviderNotReached, sendMail } from "../_shared/mailer.ts";
+import { alertMail, type Alert, confirmationMail, partnerAckMail, partnerOwnerMail, type PartnerApp, ProviderNotReached, sendMail } from "../_shared/mailer.ts";
 import { safeEqual } from "../_shared/svix.ts";
 import { DISPOSABLE } from "../_shared/disposable.ts";
 
@@ -120,17 +120,28 @@ export function makeHandler(d: Deps): (req: Request) => Promise<Response> {
 
     if (r.action === "send" && r.id && isUuid(r.id) && r.hour) {
       const { id, hour } = r;
-      d.background((async () => {
-        // the two send units were taken by the database; give one back for every email that never reached the provider
-        const refund = () => rpc(cfg, "waitlist_send_failed", { p_hour: hour }, d.fetchFn).catch(() => {});
-        try { await sendMail(cfg, partnerAckMail(cfg, email, id), d.fetchFn); log("waitlist.partner_mail", 200, "ack_sent"); }
-        catch (e) { if (e instanceof ProviderNotReached) await refund(); log("waitlist.partner_mail", 500, "ack_failed"); }
-        if (!cfg.alertTo) { await refund(); return; }   // no owner inbox configured: the application is in the database
-        try { await sendMail(cfg, partnerOwnerMail(cfg.alertTo, id, app), d.fetchFn); log("waitlist.partner_mail", 200, "owner_sent"); }
-        catch (e) { if (e instanceof ProviderNotReached) await refund(); log("waitlist.partner_mail", 500, "owner_failed"); }
-      })());
+      d.background(sendPartnerMails(id, hour, app));
     }
     return done(r.action === "send" ? "sent" : (r.reason ?? r.action));
+  }
+
+  /** Both partner emails for one application. The database already took 2 send units; one is given
+   *  back for every email that never reached the provider. If the provider could not be reached at all,
+   *  the application goes back in the queue (0007) so the next job run retries it: nothing is lost, and
+   *  the fixed idempotency keys stop the provider from delivering an email twice. */
+  async function sendPartnerMails(id: string, hour: string, app: PartnerApp): Promise<{ sent: number; down: boolean }> {
+    const refund = () => rpc(cfg, "waitlist_send_failed", { p_hour: hour }, d.fetchFn).catch(() => {});
+    let sent = 0, down = false;
+    try { await sendMail(cfg, partnerAckMail(cfg, app.email, id), d.fetchFn); sent++; log("waitlist.partner_mail", 200, "ack_sent"); }
+    catch (e) { if (e instanceof ProviderNotReached) { down = true; await refund(); } log("waitlist.partner_mail", 500, "ack_failed"); }
+    if (!cfg.alertTo) { await refund(); }            // no owner inbox configured: the application is in the database
+    else if (down) { await refund(); }               // provider unreachable: do not wait on a second timeout
+    else {
+      try { await sendMail(cfg, partnerOwnerMail(cfg.alertTo, id, app), d.fetchFn); sent++; log("waitlist.partner_mail", 200, "owner_sent"); }
+      catch (e) { if (e instanceof ProviderNotReached) { down = true; await refund(); } log("waitlist.partner_mail", 500, "owner_failed"); }
+    }
+    if (down) await rpc(cfg, "waitlist_partner_requeue", { p_id: id }, d.fetchFn).catch(() => log("waitlist.partner_mail", 500, "requeue_failed"));
+    return { sent, down };
   }
 
   async function confirm(req: Request): Promise<Response> {
@@ -209,6 +220,35 @@ export function makeHandler(d: Deps): (req: Request) => Promise<Response> {
         }
       }
     }
+    // 0007: then the partner queue (waitlist confirmations keep priority). Every row is re-validated
+    // with the same rules as the live form before anything is sent; a bad row is dropped, never mailed.
+    type PSend = { id: string; email: string; name: string; handles: unknown; pitch: string; hour: string };
+    // If the provider was unreachable for the waitlist part, the partner queue is not touched at all this run.
+    let pSent = 0, pFailed = 0, pLeft = 0;
+    if (!providerDown) {
+      try {
+        const pr = await rpc<{ sends: PSend[]; left: number }>(cfg, "waitlist_drain_partner_queue", {}, d.fetchFn);
+        pLeft = Number(pr.left) | 0;
+        let down = false;
+        for (const s of Array.isArray(pr.sends) ? pr.sends : []) {
+          if (!isUuid(s.id) || typeof s.hour !== "string") { pFailed += 2; continue; }
+          if (down) {   // provider went down mid-run: give the 2 units back and put the rest back in the queue
+            await rpc(cfg, "waitlist_send_failed", { p_hour: s.hour }, d.fetchFn).catch(() => {});
+            await rpc(cfg, "waitlist_send_failed", { p_hour: s.hour }, d.fetchFn).catch(() => {});
+            await rpc(cfg, "waitlist_partner_requeue", { p_id: s.id }, d.fetchFn).catch(() => {});
+            pFailed += 2; pLeft++; continue;
+          }
+          let app: PartnerApp;
+          try {
+            app = { email: normalizeEmail(s.email), name: partnerName(s.name), handles: partnerHandles(s.handles), pitch: partnerPitch(s.pitch) };
+          } catch { pFailed += 2; continue; }   // a row that fails the live form's rules is never mailed
+          const r2 = await sendPartnerMails(s.id, s.hour, app);
+          pSent += r2.sent; pFailed += 2 - r2.sent;
+          if (r2.down) { down = true; pLeft++; }
+        }
+      } catch { log("waitlist.drain", 500, "partner_queue_failed"); }
+    }
+
     // Alerts are marked as handed out by the RPC. If the alert email fails they stay readable
     // in private.alerts (and the log line below says so).
     const alerts = await rpc<Alert[]>(cfg, "waitlist_take_alerts", {}, d.fetchFn).catch(() => [] as Alert[]);
@@ -217,8 +257,10 @@ export function makeHandler(d: Deps): (req: Request) => Promise<Response> {
       try { await sendMail(cfg, await alertMail(cfg, cfg.alertTo, alerts, r.left, r.paused), d.fetchFn); alerted = true; }
       catch { log("waitlist.drain", 500, "alert_mail_failed"); }
     }
-    log("waitlist.drain", 200, "ok", { sent, failed, left: r.left, paused: r.paused, alerts: alerts.length, alerted });
-    return json(200, { sent, failed, left: r.left, paused: r.paused, alerts: alerts.length });
+    log("waitlist.drain", 200, "ok", { sent, failed, left: r.left, paused: r.paused, alerts: alerts.length, alerted,
+                                       partner_sent: pSent, partner_failed: pFailed, partner_left: pLeft });
+    return json(200, { sent, failed, left: r.left, paused: r.paused, alerts: alerts.length,
+                       partner_sent: pSent, partner_failed: pFailed, partner_left: pLeft });
   }
 
   // tiny per-instance cache: a flood of GET /count does not become a flood of DB calls

@@ -122,7 +122,7 @@ const ALERT_TEXT: Record<string, string> = {
   queue_full: "The waiting queue was full (some people could not be queued)",
   paused_signups: "Sending is paused and people are signing up (they are queued)",
   auto_paused: "SENDING WAS PAUSED AUTOMATICALLY: bounce or spam-complaint spike",
-  partner_mail_skipped: "Partner applications were saved WITHOUT emails (send cap full or paused): read them in private.partner_applications",
+  partner_mail_skipped: "Partner application emails were delayed (send cap full or paused): they are queued and go out automatically; all applications are in private.partner_applications",
 };
 export async function alertMail(_cfg: Config, to: string, alerts: Alert[], queued: number, paused: boolean): Promise<Mail> {
   const known = alerts.filter((a) => a.kind in ALERT_TEXT);

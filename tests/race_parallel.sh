@@ -56,3 +56,14 @@ $PG -c "delete from private.counters where bucket='partner_day'" >/dev/null
 res=$(race 40 "select public.waitlist_partner_apply('many-:i@example.com', $P)->>'action'")
 check "$(grep -c '^send$' <<<"$res" || true)" 20 "40 simultaneous different addresses vs daily cap 20 -> exactly 20"
 check "$($PG -c "select count(*) from private.partner_applications where email like 'many-%'")" 20 "exactly 20 stored"
+
+# 0007) 10 drain runs at the same time on a queue of 30 -> every application sent exactly once
+$PG -c "update private.settings set value='0' where key='global_sends_per_hour'; update private.settings set value='100' where key='partner_per_day'; delete from private.counters; delete from private.partner_mail_queue; delete from private.partner_applications;" >/dev/null
+for i in $(seq 1 30); do $PG -c "set role service_role; select public.waitlist_partner_apply('pq-$i@example.com', $P)" >/dev/null; done
+check "$($PG -c "select count(*) from private.partner_mail_queue")" 30 "30 partner applications queued while the cap is 0"
+$PG -c "update private.settings set value='500' where key='global_sends_per_hour'; update private.settings set value='50' where key='drain_batch'" >/dev/null
+res=$(race 10 "select e->>'id' from jsonb_array_elements(public.waitlist_drain_partner_queue()->'sends') e")
+if grep -qi "deadlock\|ERROR" <<<"$res"; then echo "FAIL: partner drain race raised an error"; exit 1; fi
+check "$(grep -cE '^[0-9a-f-]{36}$' <<<"$res" || true)" 30 "10 simultaneous drains -> 30 sends in total"
+check "$(grep -E '^[0-9a-f-]{36}$' <<<"$res" | sort -u | wc -l | tr -d ' ')" 30 "no application sent twice"
+check "$($PG -c "select count(*) from private.partner_mail_queue")" 0 "partner queue empty"

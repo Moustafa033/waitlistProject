@@ -46,6 +46,7 @@ function fakeFetch(opts: { rpc?: Record<string, unknown>; turnstile?: Record<str
         waitlist_send_failed: null, waitlist_suppress: null,
         waitlist_unsub_token: "U".repeat(43), waitlist_erase_by_token: { ok: true },
         waitlist_partner_apply: { action: "send", id: "22222222-2222-4222-8222-222222222222", hour: "2026-11-18T10:00:00Z" },
+        waitlist_drain_partner_queue: { sends: [], left: 0, paused: false }, waitlist_partner_requeue: true,
       };
       return Response.json(opts.rpc?.[name] ?? def[name]);
     }
@@ -570,4 +571,61 @@ Deno.test("partner: without ALERT_TO only the applicant email goes out and the o
   await settle();
   eq(mails(calls).length, 1);
   eq(calls.filter((c) => c.url.endsWith("/rpc/waitlist_send_failed")).length, 1);
+});
+
+// ------------------------------------------------------------------ 0007 partner mail queue
+const PROW = { id: "44444444-4444-4444-8444-444444444444", email: "queued.partner@example.com", name: "Omar K",
+  handles: [{ platform: "instagram", username: "omar.lifts" }], pitch: "Coach with a small but loyal community.", hour: "2026-11-18T11:00:00Z" };
+const cronP: Config = { ...cfgP, cronSecret: CRON };
+
+Deno.test("partner: live send with the provider down puts the application back in the queue (nothing lost)", async () => {
+  const { f, calls } = fakeFetch({ resend: "down" });
+  eq((await makeHandler(depsP(f))(req("partner", partnerBody()))).status, 202);
+  await settle();
+  eq(mails(calls).length, 1, "one attempt only: no second timeout once the provider is unreachable");
+  const rq = calls.filter((c) => c.url.endsWith("/rpc/waitlist_partner_requeue"));
+  eq(rq.length, 1);
+  eq(JSON.parse(rq[0].body!).p_id, "22222222-2222-4222-8222-222222222222");
+});
+
+Deno.test("drain: queued partner applications get BOTH emails, after the waitlist queue", async () => {
+  const { f, calls } = fakeFetch({ rpc: { waitlist_drain_queue: { sends: [SEND], left: 0, paused: false },
+    waitlist_drain_partner_queue: { sends: [PROW], left: 3, paused: false }, waitlist_take_alerts: [] } });
+  const out = await (await makeHandler(depsP(f, cronP))(drainReq(CRON))).json();
+  eq([out.sent, out.partner_sent, out.partner_failed, out.partner_left], [1, 2, 0, 3]);
+  const m = mails(calls);
+  eq(m.map((x) => x.to[0]), ["queued@example.com", "queued.partner@example.com", "owner@example.com"], "waitlist first, then the partner pair");
+  eq(m[1].subject, "We received your application");
+  eq(m[1].key, "partner-ack/44444444-4444-4444-8444-444444444444", "same idempotency key as a live send: never delivered twice");
+  eq(m[2].reply_to, "queued.partner@example.com");
+  assert(m[2].text.includes("Name: Omar K"));
+});
+
+Deno.test("drain: a partner row that breaks the form rules is never mailed", async () => {
+  const bad = [{ ...PROW, name: "Visit http://spam.example" }, { ...PROW, email: "x@y.com\r\nBcc: a@b.com" },
+               { ...PROW, handles: [{ platform: "tiktok", username: "https://evil" }] }, { ...PROW, id: "not-a-uuid" }];
+  const { f, calls } = fakeFetch({ rpc: { waitlist_drain_queue: { sends: [], left: 0, paused: false },
+    waitlist_drain_partner_queue: { sends: bad, left: 0, paused: false }, waitlist_take_alerts: [] } });
+  const out = await (await makeHandler(depsP(f, cronP))(drainReq(CRON))).json();
+  eq([out.partner_sent, out.partner_failed], [0, 8]);
+  eq(mails(calls).length, 0);
+});
+
+Deno.test("drain: provider down mid-run -> partner units refunded and EVERY row put back in the queue", async () => {
+  const { f, calls } = fakeFetch({ resend: "down", rpc: { waitlist_drain_queue: { sends: [], left: 0, paused: false },
+    waitlist_drain_partner_queue: { sends: [PROW, { ...PROW, id: "55555555-5555-4555-8555-555555555555" }, { ...PROW, id: "66666666-6666-4666-8666-666666666666" }], left: 0, paused: false },
+    waitlist_take_alerts: [] } });
+  const out = await (await makeHandler(depsP(f, cronP))(drainReq(CRON))).json();
+  eq([out.partner_sent, out.partner_failed, out.partner_left], [0, 6, 3]);
+  eq(mails(calls).length, 1, "only ONE attempt at the provider");
+  eq(calls.filter((c) => c.url.endsWith("/rpc/waitlist_send_failed")).length, 6, "2 units back per application");
+  eq(calls.filter((c) => c.url.endsWith("/rpc/waitlist_partner_requeue")).map((c) => JSON.parse(c.body!).p_id),
+     [PROW.id, "55555555-5555-4555-8555-555555555555", "66666666-6666-4666-8666-666666666666"], "all three back in the queue");
+});
+
+Deno.test("drain: provider already down for the waitlist -> the partner queue is not touched this run", async () => {
+  const { f, calls } = fakeFetch({ resend: "down", rpc: { waitlist_drain_queue: { sends: [SEND], left: 0, paused: false },
+    waitlist_drain_partner_queue: { sends: [PROW], left: 1, paused: false }, waitlist_take_alerts: [] } });
+  await makeHandler(depsP(f, cronP))(drainReq(CRON));
+  eq(calls.filter((c) => c.url.endsWith("/rpc/waitlist_drain_partner_queue")).length, 0, "no rows taken out of the partner queue");
 });
