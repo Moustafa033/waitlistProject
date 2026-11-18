@@ -45,9 +45,9 @@ function fakeFetch(opts: { rpc?: Record<string, unknown>; turnstile?: Record<str
         waitlist_confirm: { ok: true }, waitlist_unsubscribe: { ok: true }, waitlist_public_count: 1230,
         waitlist_send_failed: null, waitlist_suppress: null,
         waitlist_unsub_token: "U".repeat(43), waitlist_erase_by_token: { ok: true },
-        waitlist_partner_apply: { action: "send", kind: "confirm", id: "22222222-2222-4222-8222-222222222222", token: "P".repeat(43), send_no: 1, hour: "2026-11-18T10:00:00Z" },
+        waitlist_partner_apply: { action: "send", kind: "confirm", id: "22222222-2222-4222-8222-222222222222", token: "P".repeat(43), tag: "ab12cd34ef56ab78", send_no: 1, hour: "2026-11-18T10:00:00Z" },
         waitlist_partner_confirm: { ok: true, action: "send", id: "22222222-2222-4222-8222-222222222222", hour: "2026-11-18T10:00:00Z", email: "sara@example.com", name: "Sara Ali", handles: [{ platform: "tiktok", username: "@sara.fit" }], pitch: "Personal trainer, 20k followers. I can post 2 reviews a month." },
-        waitlist_drain_partner_queue: { sends: [], left: 0, paused: false }, waitlist_partner_requeue: true, waitlist_send_allowed: "ok",
+        waitlist_drain_partner_queue: { sends: [], left: 0, paused: false }, waitlist_partner_requeue: true, waitlist_send_allowed: "ok", waitlist_signup_requeue: true,
       };
       return Response.json(opts.rpc?.[name] ?? def[name]);
     }
@@ -159,7 +159,7 @@ Deno.test("signup happy path: Turnstile checked, RPC called with normalized emai
   assert(!/ahmed@example\.com/.test(m.html + m.text + m.subject), "the recipient's address is never echoed into the email");
   // Turnstile first, then the signup RPC; the signed-link RPC and the mail run in the background.
   const order = calls.map((c) => c.url.includes("cloudflare") ? "ts" : c.url.includes("rpc") ? c.url.split("/").pop() : "mail");
-  eq(order, ["ts", "waitlist_signup", "waitlist_unsub_token", "mail"], "Turnstile must run BEFORE the database");
+  eq(order, ["ts", "waitlist_signup", "waitlist_send_allowed", "waitlist_unsub_token", "mail"], "Turnstile must run BEFORE the database; the send-time check right before the email");
 });
 
 Deno.test("confirmation mail carries reply_to only when configured", async () => {
@@ -454,13 +454,13 @@ Deno.test("partner apply: Turnstile(partner_apply) first, then ONE fixed confirm
   eq(await res.json(), { ok: true, message: "check_inbox" });
   await settle();
   const order = calls.map((c) => c.url.includes("cloudflare") ? "ts" : c.url.includes("rpc") ? c.url.split("/").pop() : "mail");
-  eq(order, ["ts", "waitlist_partner_apply", "mail"], "Turnstile before the database; exactly ONE email");
+  eq(order, ["ts", "waitlist_partner_apply", "waitlist_send_allowed", "mail"], "Turnstile before the database; send-time check; exactly ONE email");
   const args = JSON.parse(calls.find((c) => c.url.endsWith("/rpc/waitlist_partner_apply"))!.body!);
   eq(args.p_email, "sara@example.com");
   const [m] = mails(calls);
   eq(m.to, ["sara@example.com"]);
   eq(m.subject, "Confirm your application");
-  eq(m.key, `partner-confirm/${PID}/1`);
+  eq(m.key, `partner-confirm/${PID}/1/ab12cd34ef56ab78`, "the key carries the link fingerprint (never the token)");
   eq(m.reply_to, "create@example.com");
   assert(m.text.includes(`${ORIGIN}/partners-confirm#t=${"P".repeat(43)}`), "token in the fragment");
   assert(m.html.includes(`href="${ORIGIN}/partners-confirm#t=${"P".repeat(43)}"`), "HTML button uses the fragment link");
@@ -642,7 +642,7 @@ Deno.test("audit #15: a refused requeue (queue full) is logged, not silent", asy
 
 // ------------------------------------------------------------------ partner mail queue (0007 + 0009)
 const cronP: Config = { ...cfgP, cronSecret: CRON };
-const QCONF = { kind: "confirm", id: "44444444-4444-4444-8444-444444444444", email: "queued.partner@example.com", token: "Q".repeat(43), send_no: 1, hour: "2026-11-18T11:00:00Z" };
+const QCONF = { kind: "confirm", id: "44444444-4444-4444-8444-444444444444", email: "queued.partner@example.com", token: "Q".repeat(43), tag: "0011223344556677", send_no: 1, hour: "2026-11-18T11:00:00Z" };
 const QOWNER = { kind: "owner", id: "55555555-5555-4555-8555-555555555555", email: "omar@example.com", name: "Omar K",
   handles: [{ platform: "instagram", username: "omar.lifts" }], pitch: "Coach with a small but loyal community.", hour: "2026-11-18T11:00:00Z" };
 
@@ -655,7 +655,7 @@ Deno.test("drain: queued partner rows send ONE email each (confirmation link or 
   eq(m.map((x) => x.to[0]), ["queued@example.com", "queued.partner@example.com", "owner@example.com"], "waitlist first");
   eq(m[1].subject, "Confirm your application");
   assert(m[1].text.includes(`/partners-confirm#t=${"Q".repeat(43)}`));
-  eq(m[1].key, "partner-confirm/44444444-4444-4444-8444-444444444444/1");
+  eq(m[1].key, "partner-confirm/44444444-4444-4444-8444-444444444444/1/0011223344556677");
   eq(m[2].subject, "New partner application");
   eq(m[2].reply_to, "omar@example.com");
 });
@@ -745,4 +745,36 @@ Deno.test("re-check R6: a refused requeue is not counted as waiting", async () =
     waitlist_partner_requeue: false, waitlist_take_alerts: [] } });
   const out = await (await makeHandler(depsP(f, cronP))(drainReq(CRON))).json();
   eq(out.partner_left, 0, "queue refused them: not reported as waiting");
+});
+
+// ------------------------------------------------------------------ Codex re-check 2
+Deno.test("re-check 2 #1: LIVE sends also check right before the email (unsubscribed / deleted meanwhile -> nothing sent)", async () => {
+  for (const verdict of ["cancelled", "suppressed"]) {
+    const { f, calls } = fakeFetch({ rpc: { waitlist_send_allowed: verdict } });
+    eq((await makeHandler(deps(f))(req("signup", goodBody()))).status, 202, "visitor answer unchanged");
+    await settle();
+    eq(calls.filter((c) => c.url.startsWith("https://api.resend.com")).length, 0, `signup ${verdict}: no email`);
+    const a = JSON.parse(calls.find((c) => c.url.endsWith("/rpc/waitlist_send_allowed"))!.body!);
+    eq([a.p_kind, a.p_id], ["signup", "11111111-1111-4111-8111-111111111111"], "the check names the exact signup");
+    const p = fakeFetch({ rpc: { waitlist_send_allowed: verdict } });
+    await makeHandler(depsP(p.f))(req("partner", partnerBody()));
+    await settle();
+    eq(mails(p.calls).length, 0, `partner ${verdict}: no email`);
+  }
+});
+
+Deno.test("re-check 2 #2: a paused waitlist email goes back in the queue instead of being dropped", async () => {
+  const { f, calls } = fakeFetch({ rpc: { waitlist_drain_queue: { sends: [SEND], left: 0, paused: false },
+    waitlist_send_allowed: "paused", waitlist_take_alerts: [] } });
+  await makeHandler(depsP(f, cronP))(drainReq(CRON));
+  eq(calls.filter((c) => c.url.endsWith("/rpc/waitlist_signup_requeue")).map((c) => JSON.parse(c.body!).p_signup_id), [SEND.signup_id]);
+  eq(mails(calls).length, 0);
+});
+
+Deno.test("re-check 2 #3: a queued link without its fingerprint is never sent (no key collisions)", async () => {
+  const { f, calls } = fakeFetch({ rpc: { waitlist_drain_queue: { sends: [], left: 0, paused: false },
+    waitlist_drain_partner_queue: { sends: [{ ...QCONF, tag: undefined }, { ...QCONF, tag: "not-hex" }], left: 0, paused: false }, waitlist_take_alerts: [] } });
+  const out = await (await makeHandler(depsP(f, cronP))(drainReq(CRON))).json();
+  eq([out.partner_sent, out.partner_failed], [0, 2]);
+  eq(mails(calls).length, 0);
 });

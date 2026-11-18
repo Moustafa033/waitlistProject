@@ -99,3 +99,17 @@ res=$(race 40 "select case :i % 4
 if grep -qi "deadlock\|ERROR" <<<"$res"; then echo "FAIL: mixed partner/waitlist traffic raised an error"; grep -i "error\|deadlock" <<<"$res" | head -3; exit 1; fi
 echo "ok   40 mixed partner/waitlist requests + both drains on one inbox at once -> no deadlock, no error"
 $PG -c "update private.settings set value='30' where key='resend_min_minutes'" >/dev/null
+
+# re-check 2 #4) a POPULATED partner queue: 20 live re-applications of queued applications and 20 drains
+# at the same moment. The live path removes queue entries without waiting (skip locked), so no deadlock.
+$PG -c "delete from private.counters; delete from private.partner_mail_queue; delete from private.partner_applications; update private.settings set value='0' where key='global_sends_per_hour'; update private.settings set value='0' where key='resend_min_minutes'; update private.settings set value='false' where key='sending_paused';" >/dev/null
+for i in $(seq 1 20); do $PG -c "set role service_role; select public.waitlist_partner_apply('busyq-$i@example.com', $P)" >/dev/null; done
+check "$($PG -c "select count(*) from private.partner_mail_queue")" 20 "20 applications waiting in the queue"
+$PG -c "update private.settings set value='500' where key='global_sends_per_hour'" >/dev/null
+res=$(race 40 "select case when :i % 2 = 0
+  then public.waitlist_partner_apply('busyq-' || (:i / 2) || '@example.com', $P)->>'action'
+  else (public.waitlist_drain_partner_queue()->>'left') end")
+if grep -qi "deadlock\|ERROR" <<<"$res"; then echo "FAIL: live sends vs drains on a populated queue raised an error"; grep -i "error\|deadlock" <<<"$res" | head -3; exit 1; fi
+echo "ok   20 live re-applications + 20 drains on a populated queue at once -> no deadlock, no error"
+check "$($PG -c "select count(*) from private.partner_applications where email like 'busyq-%' and confirm_sends > 2")" 0 "nobody got more than 2 links from the race"
+$PG -c "update private.settings set value='30' where key='resend_min_minutes'" >/dev/null

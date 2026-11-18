@@ -69,7 +69,7 @@ select t.ok((select e->>'email' from jsonb_array_elements(public.waitlist_drain_
   'next day -> sent');
 reset role;
 
-\echo '--- R6: a confirmed application whose owner notice cannot be queued raises queue_full'
+\echo '--- R6 + re-check 2 #2: a confirmed application''s owner notice is queued even when the queue is "full"'
 set role service_role;
 create temp table r6 as select t.apply('r6@example.com') j;
 reset role;
@@ -80,7 +80,9 @@ delete from private.alerts;
 set role service_role;
 select t.ok((public.waitlist_partner_confirm((select j->>'token' from r6))->>'ok')::boolean, 'confirmed');
 reset role;
-select t.ok(exists (select 1 from private.alerts where kind = 'queue_full'), 'queue_full alert raised: the owner is told');
+select t.ok(exists (select 1 from private.partner_mail_queue q join private.partner_applications a on a.id = q.application_id
+                    where a.email = 'r6@example.com'), 'the owner notice is in the queue: never lost');
+select t.ok(not exists (select 1 from private.alerts where kind = 'queue_full'), 'so there is nothing to alert about');
 select t.ok((select status from private.partner_applications where email = 'r6@example.com') = 'confirmed', 'the application is in the database');
 update private.settings set value = '500'  where key = 'global_sends_per_hour';
 update private.settings set value = '1000' where key = 'partner_queue_max';
@@ -116,24 +118,66 @@ grant select on r7r to service_role;
 set role service_role;
 select t.ok(public.waitlist_partner_requeue((select (j->>'id')::uuid from r7r)), 'provider down -> requeued');
 reset role;
-select t.ok((select confirm_sends = 0 and confirm_token_hash is null and last_confirm_sent_at is null
-             from private.partner_applications where email = 'r7-retry@example.com'),
-  'the unsent link does not count, and it cannot be used');
+select t.ok((select confirm_sends = 0 and last_confirm_sent_at is null from private.partner_applications where email = 'r7-retry@example.com'),
+  'the unsent link does not count');
+-- re-check 2 #3: if the provider DID receive that email after all, its link keeps working
+set role service_role;
+select t.ok((public.waitlist_partner_confirm((select j->>'token' from r7r))->>'ok')::boolean,
+  'the current link is NOT killed by a retry');
+reset role;
 
-\echo '--- #2: the send-time check'
+\echo '--- re-check 2 #1: the send-time check looks at the address, the kill switch AND the current state'
 insert into private.suppressions(email_hash, reason) values (private.email_hash('gone2@example.com'), 'erasure');
 set role service_role;
-select t.ok(public.waitlist_send_allowed('fine@example.com') = 'ok', 'normal address -> ok');
-select t.ok(public.waitlist_send_allowed('gone2@example.com') = 'suppressed', 'deleted address -> suppressed');
+create temp table sa as select t.apply('state@example.com') j;
+reset role;
+grant select on sa to service_role;
+create temp table sw as select id from private.signups limit 0;
+insert into sw select id from private.signups where false;
+set role service_role;
+select public.waitlist_signup('wl-state@example.com', 'waitlist-v1');
+reset role;
+insert into sw select id from private.signups where email = 'wl-state@example.com';
+grant select on sw to service_role;
+set role service_role;
+select t.ok(public.waitlist_send_allowed('state@example.com', 'partner_confirm', (select (j->>'id')::uuid from sa)) = 'ok', 'pending application -> link ok');
+select t.ok(public.waitlist_send_allowed('state@example.com', 'partner_owner',   (select (j->>'id')::uuid from sa)) = 'cancelled', 'not confirmed -> no owner notice');
+select t.ok(public.waitlist_send_allowed('other@example.com', 'partner_confirm', (select (j->>'id')::uuid from sa)) = 'cancelled', 'address does not match the application -> cancelled');
+select t.ok(public.waitlist_send_allowed('state@example.com', 'partner_confirm', gen_random_uuid()) = 'cancelled', 'unknown application -> cancelled');
+select t.ok(public.waitlist_send_allowed('wl-state@example.com', 'signup', (select id from sw)) = 'ok', 'pending signup -> ok');
+select t.ok(public.waitlist_send_allowed('gone2@example.com', 'signup', gen_random_uuid()) = 'suppressed', 'deleted address -> suppressed');
+select t.ok(public.waitlist_send_allowed('state@example.com', 'something', (select (j->>'id')::uuid from sa)) = 'cancelled', 'unknown kind -> cancelled');
+reset role;
+update private.signups set status = 'unsubscribed', unsubscribed_at = now() where email = 'wl-state@example.com';
+set role service_role;
+select t.ok(public.waitlist_send_allowed('wl-state@example.com', 'signup', (select id from sw)) = 'cancelled',
+  'unsubscribed meanwhile -> cancelled (not just suppressed addresses)');
 reset role;
 update private.settings set value = 'true' where key = 'sending_paused';
 set role service_role;
-select t.ok(public.waitlist_send_allowed('fine@example.com') = 'paused', 'kill switch on -> paused');
+select t.ok(public.waitlist_send_allowed('state@example.com', 'partner_confirm', (select (j->>'id')::uuid from sa)) = 'paused', 'kill switch on -> paused');
 reset role;
 update private.settings set value = 'false' where key = 'sending_paused';
 set role anon;
-select t.fails($$select public.waitlist_send_allowed('a@example.com')$$, '42501', 'anon cannot use the check (no address probing)');
+select t.fails($$select public.waitlist_send_allowed('a@example.com', 'signup', gen_random_uuid())$$, '42501', 'anon cannot use the check');
 reset role;
+
+\echo '--- re-check 2 #2: a paused waitlist email goes back in its queue; an owner notice is admitted even when the queue is full'
+delete from private.send_queue;
+set role service_role;
+select t.ok(public.waitlist_signup_requeue((select id from sw)) = false, 'an unsubscribed signup is not requeued');
+reset role;
+update private.signups set status = 'pending', unsubscribed_at = null where email = 'wl-state@example.com';
+set role service_role;
+select t.ok(public.waitlist_signup_requeue((select id from sw)), 'a pending signup is requeued');
+reset role;
+select t.ok((select count(*) from private.send_queue) = 1, 'it is back in the waitlist queue');
+update private.settings set value = '0' where key = 'partner_queue_max';
+update private.partner_applications set status = 'confirmed', confirmed_at = now() where email = 'state@example.com';
+set role service_role;
+select t.ok(public.waitlist_partner_requeue((select (j->>'id')::uuid from sa)), 'queue "full" -> the owner notice of a CONFIRMED application is still admitted');
+reset role;
+update private.settings set value = '1000' where key = 'partner_queue_max';
 
 drop function t.apply(text, text);
 delete from private.counters; delete from private.alerts; delete from private.partner_mail_queue; delete from private.suppressions;

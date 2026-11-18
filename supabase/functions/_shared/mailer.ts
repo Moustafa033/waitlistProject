@@ -154,7 +154,7 @@ const PCONF_IGNORE = "Didn't apply? Just ignore this email. The application is d
 /** The ONE standard email every applicant gets (0009): a confirmation link. Fixed text only: nothing
  *  the visitor typed (not even their name) is ever put in it, so the form cannot be used to send spam.
  *  The token travels in the URL FRAGMENT (#), so it never reaches a server log, proxy or Referer. */
-export function partnerConfirmMail(cfg: Config, to: string, token: string, id: string, sendNo: number): Mail {
+export function partnerConfirmMail(cfg: Config, to: string, token: string, id: string, sendNo: number, tag: string): Mail {
   const link = `${cfg.siteOrigin}/partners-confirm#t=${token}`;
   const font = "-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif";
   const logo = `${esc(cfg.siteOrigin)}/email-logo.png`;
@@ -182,7 +182,9 @@ export function partnerConfirmMail(cfg: Config, to: string, token: string, id: s
 </td></tr></table>
 </td></tr></table>
 </body></html>`,
-    idempotencyKey: `partner-confirm/${id}/${sendNo}`,
+    // tag = 8 bytes of the token HASH (from the database, never the token): a retry with a new link can
+    // never reuse the key of an earlier, different email (re-check 2 #3)
+    idempotencyKey: `partner-confirm/${id}/${sendNo}/${tag}`,
   };
 }
 

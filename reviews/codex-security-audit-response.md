@@ -70,3 +70,14 @@ that performs the attack; the tests fail without the fix (checked by running the
 - #12: `/count` across instances and well-formed unsubscribe/erase credentials still reach the database without a CAPTCHA (cheap indexed queries).
 - #13: the waitlist queue keeps the pending row's original consent version on a resubmission (all versions currently grant the same emails); fix before the next consent-text change.
 - #4, #7, #9, #10, #17, #18: Codex disagrees with accepting them. They concern retries, starvation, auto-pause precision, refund accounting, webhook scope and slow uploads. The owner decides; none lets anyone read, change or delete data.
+
+# Response to Codex re-check 2
+
+| Item | Fix | Proof |
+|---|---|---|
+| 1 (High) send after erasure / unsubscribe / pause | ONE send path for live and queued mail (waitlist and partner). Right before every handoff, `waitlist_send_allowed(email, kind, id)` checks the do-not-email list, the kill switch AND the current state of the exact signup/application (`signup` pending, `partner_confirm` pending, `partner_owner` confirmed, address must match). Anything unexpected fails closed. | Deno: live signup and live partner with `cancelled`/`suppressed` send nothing; `test_11` state checks incl. "unsubscribed meanwhile -> cancelled" |
+| 2 (Medium) lost work | A paused/errored waitlist email goes back in its queue (`waitlist_signup_requeue`), also after a provider outage. Confirmed applications' owner notices bypass the queue cap. | Deno re-check 2 #2; `test_11` (owner notice admitted at cap 0, unsubscribed signup not requeued) |
+| 3 (Medium) retry invalidates a valid link / key reuse | Requeue no longer clears the current link. Every confirmation email's idempotency key carries 8 bytes of its token HASH (`partner-confirm/<id>/<send_no>/<tag>`), so a retry with a new link never reuses an earlier key. | `test_11` (link still confirms after requeue); Deno (rows without a valid tag are never sent) |
+| 4 (Medium) drain vs live deadlock | Live paths remove queue entries with `partner_dequeue_nowait` (`for update skip locked`), never waiting on a row the drain holds. | Race on a populated queue: the old blocking delete deadlocked 3/3 runs; the fix passed 3/3 |
+
+Changed existing assertions (behaviour changed on purpose, documented): the waitlist signup happy-path step order now includes `waitlist_send_allowed` before the email (Turnstile-before-database unchanged); `test_11` R6 now expects the owner notice to be queued instead of a `queue_full` alert.

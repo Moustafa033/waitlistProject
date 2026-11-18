@@ -155,8 +155,9 @@ begin
     last_confirm_sent_at = now()
   where id = v_row.id
   returning * into v_row;
-  delete from private.partner_mail_queue where application_id = v_row.id;   -- R4: the live send supersedes it
+  perform private.partner_dequeue_nowait(v_row.id);   -- R4: the live send supersedes it (never waits: re-check 2 #4)
   return jsonb_build_object('action','send','kind','confirm','id',v_row.id,'token',v_token,
+                            'tag', encode(substr(private.token_hash(v_token), 1, 8), 'hex'),
                             'send_no',v_row.confirm_sends,'hour',v_hour);
 end $$;
 
@@ -199,7 +200,7 @@ begin
     if not private.partner_enqueue(a.id) then perform private.raise_alert('queue_full', v_day); end if;   -- R6
     return jsonb_build_object('ok', true, 'action', 'queued');
   end if;
-  delete from private.partner_mail_queue where application_id = a.id;   -- R4
+  perform private.partner_dequeue_nowait(a.id);   -- R4 (never waits)
   return jsonb_build_object('ok', true, 'action', 'send', 'id', a.id, 'hour', v_hour,
                             'email', a.email, 'name', a.name, 'handles', a.handles, 'pitch', a.pitch);
 end $$;
@@ -264,6 +265,7 @@ begin
         returning * into a;
         delete from private.partner_mail_queue where application_id = a.id;
         v_out := v_out || jsonb_build_object('kind', 'confirm', 'id', a.id, 'email', a.email, 'token', v_token,
+                                             'tag', encode(substr(private.token_hash(v_token), 1, 8), 'hex'),
                                              'send_no', a.confirm_sends, 'hour', v_hour);
       else
         if not private.take('send_hour', v_hour, private.cfg_int('global_sends_per_hour')) then exit; end if;
@@ -281,10 +283,39 @@ begin
                             'paused', private.is_paused());
 end $$;
 
+-- ---------------------------------------------------------------- queue admission (re-stated from 0008)
+-- Re-check 2 #2: the cap bounds PENDING work only. A confirmed application's owner notice is always
+-- admitted (confirmations are already bounded by partner_per_day), so it can never be lost.
+create or replace function private.partner_enqueue(p_id uuid) returns boolean
+language plpgsql security definer set search_path = '' as $$
+begin
+  perform pg_advisory_xact_lock(hashtextextended('partner_mail_queue', 0));   -- one admission at a time
+  if exists (select 1 from private.partner_mail_queue where application_id = p_id) then return true; end if;
+  if (select status from private.partner_applications where id = p_id) is distinct from 'confirmed'
+     and (select count(*) from private.partner_mail_queue) >= private.cfg_int('partner_queue_max') then
+    return false;
+  end if;
+  insert into private.partner_mail_queue(application_id) values (p_id) on conflict do nothing;
+  return true;
+end $$;
+
+-- Re-check 2 #4: removing a queue entry from a LIVE path must never wait on a row the drain holds
+-- (the drain may hold counters the live path needs => deadlock). A row the drain holds is left
+-- alone; the drain re-checks status and cooldown under its own lock and drops it.
+create or replace function private.partner_dequeue_nowait(p_id uuid) returns void
+language sql security definer set search_path = '' as $$
+  delete from private.partner_mail_queue
+   where application_id in (select application_id from private.partner_mail_queue
+                             where application_id = p_id for update skip locked)
+$$;
+
 -- ---------------------------------------------------------------- requeue (re-stated from 0007)
 -- R3: locks the application row BEFORE queue admission (same order as apply/confirm).
--- R7: a confirmation link that never reached the provider does not count as one of the 3 links,
--- and its token is cleared (that email does not exist). Returns false if refused (queue full).
+-- R7: a confirmation link that never reached the provider does not count as one of the 3 links.
+-- Re-check 2 #3: the current link is NOT cleared (if the provider did receive that email, its link
+-- keeps working until a newer link replaces it); every email carries its own link's fingerprint in
+-- the idempotency key, so a retry can never collide with an earlier, different email.
+-- Returns false if refused (queue full).
 create or replace function public.waitlist_partner_requeue(p_id uuid) returns boolean
 language plpgsql security definer set search_path = '' as $$
 declare a private.partner_applications%rowtype;
@@ -294,8 +325,7 @@ begin
   if not found then return false; end if;
   if a.status = 'pending' then
     update private.partner_applications
-       set confirm_sends = greatest(confirm_sends - 1, 0), last_confirm_sent_at = null,
-           confirm_token_hash = null, confirm_expires_at = null
+       set confirm_sends = greatest(confirm_sends - 1, 0), last_confirm_sent_at = null
      where id = p_id;
   end if;
   if not private.partner_enqueue(p_id) then
@@ -305,15 +335,37 @@ begin
   return true;
 end $$;
 
+-- Re-check 2 #2: a claimed waitlist confirmation that could not be handed over (pause, temporary
+-- error) goes back in the waitlist queue instead of being dropped. Only a still-pending signup.
+create or replace function public.waitlist_signup_requeue(p_signup_id uuid) returns boolean
+language plpgsql security definer set search_path = '' as $$
+begin
+  if p_signup_id is null or not exists (select 1 from private.signups where id = p_signup_id and status = 'pending') then
+    return false;
+  end if;
+  return private.enqueue(p_signup_id);
+end $$;
+
 -- ---------------------------------------------------------------- #2 send-time check
--- The worker calls this right before handing each QUEUED email to the provider, so a pause or a
--- deletion / bounce / complaint that committed while it was working stops the emails not yet sent.
--- Returns 'ok', 'paused' (temporary: partner work is put back in the queue) or 'suppressed'
--- (deleted / bounced / complained: never send).
-create or replace function public.waitlist_send_allowed(p_email text) returns text
+-- Asked right before EVERY email is handed to the provider, immediate or queued (re-check 2 #1).
+-- Checks the address (do-not-email list), the kill switch, AND the current state of the thing the
+-- email is about, so an unsubscribe, a deletion or a confirmation that committed meanwhile cancels it:
+--   p_kind 'signup'          -> the signup must still exist and be pending
+--   p_kind 'partner_confirm' -> the application must still exist and be pending
+--   p_kind 'partner_owner'   -> the application must still exist and be confirmed
+-- Returns 'ok', 'paused' (temporary: the work goes back in the queue), 'suppressed' or 'cancelled'
+-- (never send).
+create or replace function public.waitlist_send_allowed(p_email text, p_kind text, p_id uuid) returns text
 language sql stable security definer set search_path = '' as $$
   select case
     when exists (select 1 from private.suppressions where email_hash = private.email_hash(p_email)) then 'suppressed'
+    when p_kind = 'signup' and not exists (select 1 from private.signups where id = p_id and status = 'pending'
+                                           and email = private.normalize_email(p_email)) then 'cancelled'
+    when p_kind = 'partner_confirm' and not exists (select 1 from private.partner_applications where id = p_id
+                                                    and status = 'pending' and email = private.normalize_email(p_email)) then 'cancelled'
+    when p_kind = 'partner_owner' and not exists (select 1 from private.partner_applications where id = p_id
+                                                  and status = 'confirmed' and email = private.normalize_email(p_email)) then 'cancelled'
+    when p_kind not in ('signup', 'partner_confirm', 'partner_owner') or p_kind is null then 'cancelled'
     when private.is_paused() then 'paused'
     else 'ok' end
 $$;
@@ -348,11 +400,13 @@ begin
 end $$;
 
 -- ---------------------------------------------------------------- privileges
+revoke all on function private.partner_enqueue(uuid)        from public, anon, authenticated;
+revoke all on function private.partner_dequeue_nowait(uuid) from public, anon, authenticated;
 do $$ declare f text; begin
   foreach f in array array[
     'public.waitlist_partner_apply(text,text,jsonb,text,text)', 'public.waitlist_partner_confirm(text)',
     'public.waitlist_drain_partner_queue()', 'public.waitlist_partner_requeue(uuid)',
-    'public.waitlist_send_allowed(text)', 'public.waitlist_maintenance()'] loop
+    'public.waitlist_send_allowed(text,text,uuid)', 'public.waitlist_signup_requeue(uuid)', 'public.waitlist_maintenance()'] loop
     execute format('revoke all on function %s from public, anon, authenticated', f);
     execute format('grant execute on function %s to service_role', f);
   end loop;
