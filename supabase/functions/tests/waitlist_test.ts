@@ -47,7 +47,7 @@ function fakeFetch(opts: { rpc?: Record<string, unknown>; turnstile?: Record<str
         waitlist_unsub_token: "U".repeat(43), waitlist_erase_by_token: { ok: true },
         waitlist_partner_apply: { action: "send", kind: "confirm", id: "22222222-2222-4222-8222-222222222222", token: "P".repeat(43), send_no: 1, hour: "2026-11-18T10:00:00Z" },
         waitlist_partner_confirm: { ok: true, action: "send", id: "22222222-2222-4222-8222-222222222222", hour: "2026-11-18T10:00:00Z", email: "sara@example.com", name: "Sara Ali", handles: [{ platform: "tiktok", username: "@sara.fit" }], pitch: "Personal trainer, 20k followers. I can post 2 reviews a month." },
-        waitlist_drain_partner_queue: { sends: [], left: 0, paused: false }, waitlist_partner_requeue: true,
+        waitlist_drain_partner_queue: { sends: [], left: 0, paused: false }, waitlist_partner_requeue: true, waitlist_send_allowed: "ok",
       };
       return Response.json(opts.rpc?.[name] ?? def[name]);
     }
@@ -708,4 +708,41 @@ Deno.test("audit #12: 20 simultaneous /count requests on a cold cache start ONE 
 Deno.test("audit #23: letters that lowercase INTO ascii (Kelvin sign, dotted capital I, long s) are refused, not folded", () => {
   for (const cp of [0x212a, 0x0130, 0x017f]) throwsCode(() => normalizeEmail(String.fromCodePoint(cp) + "ate@example.com"), "invalid_email");
   eq(normalizeEmail("  Kate@Example.com "), "kate@example.com", "plain ASCII still works");
+});
+
+// ------------------------------------------------------------------ Codex re-check fixes
+Deno.test("re-check #2: a waitlist address deleted/bounced (or a pause) after the batch was claimed is NOT emailed", async () => {
+  for (const verdict of ["suppressed", "paused"]) {
+    const { f, calls } = fakeFetch({ rpc: { waitlist_drain_queue: { sends: [SEND], left: 0, paused: false },
+      waitlist_send_allowed: verdict, waitlist_take_alerts: [] } });
+    const out = await (await makeHandler(depsP(f, cronP))(drainReq(CRON))).json();
+    eq([out.sent, out.failed], [0, 1], verdict);
+    eq(mails(calls).length, 0, `${verdict}: nothing handed to the provider`);
+    eq(calls.filter((c) => c.url.endsWith("/rpc/waitlist_send_failed")).length, 1, `${verdict}: the unit is given back`);
+  }
+});
+
+Deno.test("re-check #2: a queued partner email checks again right before the send (paused -> back in the queue, deleted -> dropped)", async () => {
+  const run = async (verdict: string) => {
+    const { f, calls } = fakeFetch({ rpc: { waitlist_drain_queue: { sends: [], left: 0, paused: false },
+      waitlist_drain_partner_queue: { sends: [QCONF, QOWNER], left: 0, paused: false }, waitlist_send_allowed: verdict, waitlist_take_alerts: [] } });
+    const out = await (await makeHandler(depsP(f, cronP))(drainReq(CRON))).json();
+    return { out, mails: mails(calls).length, requeues: calls.filter((c) => c.url.endsWith("/rpc/waitlist_partner_requeue")).length,
+             refunds: calls.filter((c) => c.url.endsWith("/rpc/waitlist_send_failed")).length };
+  };
+  const p = await run("paused");
+  eq([p.mails, p.requeues, p.refunds, p.out.partner_left], [0, 2, 2, 2], "paused: nothing sent, both back in the queue");
+  const s = await run("suppressed");
+  eq([s.mails, s.requeues, s.refunds], [0, 0, 2], "deleted/bounced: nothing sent, nothing requeued");
+  const broken = await run("garbage");
+  eq(broken.mails, 0, "an unexpected answer fails closed");
+});
+
+Deno.test("re-check R6: a refused requeue is not counted as waiting", async () => {
+  const ids = ["44444444-4444-4444-8444-444444444444", "66666666-6666-4666-8666-666666666666"];
+  const { f } = fakeFetch({ resend: "down", rpc: { waitlist_drain_queue: { sends: [], left: 0, paused: false },
+    waitlist_drain_partner_queue: { sends: ids.map((id) => ({ ...QCONF, id })), left: 0, paused: false },
+    waitlist_partner_requeue: false, waitlist_take_alerts: [] } });
+  const out = await (await makeHandler(depsP(f, cronP))(drainReq(CRON))).json();
+  eq(out.partner_left, 0, "queue refused them: not reported as waiting");
 });

@@ -35,6 +35,12 @@
     else { btn.disabled = true; say("Could not load the verification step. Please reload."); }
   })(0);
 
+  function retry(msg) {
+    say(msg);
+    btn.disabled = false;
+    if (window.turnstile && widgetId !== null) window.turnstile.reset(widgetId);   // a fresh check token for the retry
+  }
+
   async function send() {
     if (done || busy || !tsToken) return;
     busy = true; wanted = false; btn.disabled = true; say("Confirming…");
@@ -49,13 +55,16 @@
       if (res.ok && data.ok === true) {
         done = true;
         say("Application received. We'll review it and get in touch as soon as possible.");
-      } else {
+      } else if (res.ok && data.ok === false) {
+        // the server looked the link up and refused it: expired, used or replaced by a newer application
+        done = true;
         say("This link has expired or was already used. You can apply again on the Work with us page.");
+      } else {
+        // a temporary problem (verification, network, server): the link may still be valid, so allow a retry
+        retry(data.error === "verification_failed" ? "Verification failed. Please try again." : "Something went wrong on our side. Please try again in a moment.");
       }
     } catch {
-      say("Something went wrong. Please try again.");
-      btn.disabled = false;
-      if (window.turnstile && widgetId !== null) window.turnstile.reset(widgetId);
+      retry("Something went wrong. Please try again.");
     } finally {
       busy = false;
     }

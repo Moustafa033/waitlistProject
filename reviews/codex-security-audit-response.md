@@ -46,3 +46,27 @@ that performs the attack; the tests fail without the fix (checked by running the
 | 21 | The server role can call owner functions | That role is the secret key; whoever has it already controls everything. It never leaves Supabase. |
 | 24 | CSV export safety depends on the owner using `toCsv()` | No export is in use yet; documented in the guide. |
 | 27 | Form attestations are soft | Correct and intended; Turnstile and the database enforce. |
+
+# Response to the Codex re-check (reviews/codex-recheck.md)
+
+0008 and 0009 were not yet applied in production, so 0009 was corrected in place.
+
+## Fixed
+
+| Item | Fix | Proof |
+|---|---|---|
+| R1 (blocker) | Replacing a pending application's details clears its token in every branch (live, paused, cap full, queue full). A link approves only the details it was issued for. | `test_11` R1 (old link refused after a paused replacement); breaking the fix makes it fail |
+| #2 (blocker) | `waitlist_send_allowed(email)` is asked right before EVERY queued email (waitlist and partner) is handed to the provider: `suppressed` -> never sent, unit refunded; `paused` -> unit refunded, partner work requeued. Fails closed on any other answer or error. | Deno re-check #2 (both queues, both verdicts, garbage answer); `test_11` #2 |
+| R2 | Rows from before 0009 are NOT confirmed: they become pending with no possible link and are deleted by maintenance after 48 h. Legacy queue entries are dropped. | Reviewed; the local suite starts from an empty database |
+| R3 | One lock order: application row -> mailbox advisory lock -> mailbox counter -> global counters -> queue admission. Partner apply takes the same mailbox advisory lock as waitlist signup; the partner drain only TRIES the application row and the mailbox lock; requeue locks the row before admission. | Race: 40 mixed partner/waitlist requests + both drains on one inbox, 3 runs, no deadlock |
+| R4 | A live link or live owner notice deletes any older queue entry of the same application; the drain re-checks status, cooldown and attempt cap under the row lock. | `test_11` R4 |
+| R5 | A queued link gives its mailbox unit back; the drain charges the mailbox allowance on the dispatch day (try-lock), and leaves the row queued if the inbox already had its emails today. | `test_11` R5 |
+| R6 | A refused queue admission (apply, confirm, requeue) raises `queue_full`; the worker counts only successful requeues as waiting. | `test_11` R6; Deno re-check R6 |
+| R7 | The drain deletes pending rows past the 48 h deadline instead of sending a new link; cleanup no longer exempts queued rows; a requeued link that never reached the provider gives its attempt back and its token is cleared. | `test_11` R7 |
+| R8 | The confirm page distinguishes "link refused" (expired/used/replaced) from temporary errors, which keep the button usable with a fresh Turnstile token. | `node --check`; logic reviewed (no browser harness for this page yet) |
+
+## Still open (owner decision, low impact at current volume)
+- #5: a fresh address can still get `busy` while capacity fills concurrently (a narrow race; no address state is read before the first capacity check).
+- #12: `/count` across instances and well-formed unsubscribe/erase credentials still reach the database without a CAPTCHA (cheap indexed queries).
+- #13: the waitlist queue keeps the pending row's original consent version on a resubmission (all versions currently grant the same emails); fix before the next consent-text change.
+- #4, #7, #9, #10, #17, #18: Codex disagrees with accepting them. They concern retries, starvation, auto-pause precision, refund accounting, webhook scope and slow uploads. The owner decides; none lets anyone read, change or delete data.

@@ -154,30 +154,38 @@ export function makeHandler(d: Deps): (req: Request) => Promise<Response> {
 
   // Audit #15: a requeue that fails or is refused (queue full) is logged, never silent. The application
   // itself is always in the database, and the owner gets the partner_mail_skipped alert.
-  async function requeue(id: string): Promise<void> {
+  // Returns whether the application is back in the queue (re-check R6: refusals are not counted as waiting).
+  async function requeue(id: string): Promise<boolean> {
     const ok = await rpc<boolean>(cfg, "waitlist_partner_requeue", { p_id: id }, d.fetchFn).catch(() => false);
     if (ok !== true) log("waitlist.partner_mail", 500, "requeue_failed");
+    return ok === true;
+  }
+
+  // Re-check #2: asked right before each QUEUED email goes to the provider. A pause, deletion, bounce or
+  // complaint that committed while the job was working stops the emails not yet sent. Fails closed.
+  async function sendAllowed(email: string): Promise<"ok" | "paused" | "suppressed"> {
+    const v = await rpc<string>(cfg, "waitlist_send_allowed", { p_email: email }, d.fetchFn).catch(() => "paused");
+    return v === "ok" || v === "suppressed" ? v : "paused";
   }
 
   /** One partner email. The database already took its send unit. If the provider was not reached,
    *  the unit is given back and the application goes back in the queue, so the next job run retries it
-   *  (the row's status decides what is sent). Returns whether the provider could not be reached. */
-  async function partnerSend(id: string, hour: string, m: () => Mail, code: string): Promise<{ sent: boolean; down: boolean }> {
-    try { await sendMail(cfg, m(), d.fetchFn); log("waitlist.partner_mail", 200, `${code}_sent`); return { sent: true, down: false }; }
+   *  (the row's status decides what is sent). */
+  async function partnerSend(id: string, hour: string, m: () => Mail, code: string): Promise<{ sent: boolean; down: boolean; requeued: boolean }> {
+    try { await sendMail(cfg, m(), d.fetchFn); log("waitlist.partner_mail", 200, `${code}_sent`); return { sent: true, down: false, requeued: false }; }
     catch (e) {
       log("waitlist.partner_mail", 500, `${code}_failed`);
-      if (!(e instanceof ProviderNotReached)) return { sent: false, down: false };
+      if (!(e instanceof ProviderNotReached)) return { sent: false, down: false, requeued: false };
       await rpc(cfg, "waitlist_send_failed", { p_hour: hour }, d.fetchFn).catch(() => {});
-      await requeue(id);
-      return { sent: false, down: true };
+      return { sent: false, down: true, requeued: await requeue(id) };
     }
   }
   const sendPartnerConfirm = (id: string, email: string, token: string, sendNo: number, hour: string) =>
     partnerSend(id, hour, () => partnerConfirmMail(cfg, email, token, id, sendNo), "confirm");
-  async function sendPartnerOwner(id: string, hour: string, app: PartnerApp): Promise<{ sent: boolean; down: boolean }> {
+  async function sendPartnerOwner(id: string, hour: string, app: PartnerApp): Promise<{ sent: boolean; down: boolean; requeued: boolean }> {
     if (!cfg.alertTo) {   // no owner inbox configured: the confirmed application is in the database
       await rpc(cfg, "waitlist_send_failed", { p_hour: hour }, d.fetchFn).catch(() => {});
-      return { sent: false, down: false };
+      return { sent: false, down: false, requeued: false };
     }
     const to = cfg.alertTo;
     return await partnerSend(id, hour, () => partnerOwnerMail(to, id, app), "owner");
@@ -243,6 +251,12 @@ export function makeHandler(d: Deps): (req: Request) => Promise<Response> {
       let email: string;
       try { email = normalizeEmail(s.email); } catch { failed++; continue; }
       if (!isToken(s.token) || !isUuid(s.signup_id) || !Number.isInteger(s.send_no)) { failed++; continue; }
+      // re-check #2: paused or deleted/bounced since the batch was claimed => do not send; give the unit back
+      if (!providerDown && (await sendAllowed(email)) !== "ok") {
+        failed++;
+        await rpc(cfg, "waitlist_send_failed", { p_hour: s.hour }, d.fetchFn).catch(() => {});
+        continue;
+      }
       try {
         // after one "provider not reached", do not wait on the rest (keeps the run short)
         if (providerDown) throw new ProviderNotReached();
@@ -276,21 +290,30 @@ export function makeHandler(d: Deps): (req: Request) => Promise<Response> {
           if (!isUuid(s.id) || typeof s.hour !== "string") { pFailed++; continue; }
           if (down) {   // provider went down mid-run: give the unit back and put the rest back in the queue
             await rpc(cfg, "waitlist_send_failed", { p_hour: s.hour }, d.fetchFn).catch(() => {});
-            await requeue(s.id);
-            pFailed++; pLeft++; continue;
+            if (await requeue(s.id)) pLeft++;
+            pFailed++; continue;
           }
-          let r2: { sent: boolean; down: boolean };
+          let email: string;
+          try { email = normalizeEmail(s.email); } catch { pFailed++; continue; }
+          // re-check #2: right before the handoff. Paused => back in the queue; deleted/bounced => dropped.
+          const allowed = await sendAllowed(email);
+          if (allowed !== "ok") {
+            await rpc(cfg, "waitlist_send_failed", { p_hour: s.hour }, d.fetchFn).catch(() => {});
+            if (allowed === "paused" && await requeue(s.id)) pLeft++;
+            pFailed++; continue;
+          }
+          let r2: { sent: boolean; down: boolean; requeued: boolean };
           try {
             if (s.kind === "confirm") {
               if (!isToken(s.token) || !Number.isInteger(s.send_no)) throw new Error("row");
-              r2 = await sendPartnerConfirm(s.id, normalizeEmail(s.email), s.token, s.send_no!, s.hour);
+              r2 = await sendPartnerConfirm(s.id, email, s.token, s.send_no!, s.hour);
             } else if (s.kind === "owner") {
-              const app = { email: normalizeEmail(s.email), name: partnerName(s.name), handles: partnerHandles(s.handles), pitch: partnerPitch(s.pitch) };
+              const app = { email, name: partnerName(s.name), handles: partnerHandles(s.handles), pitch: partnerPitch(s.pitch) };
               r2 = await sendPartnerOwner(s.id, s.hour, app);
             } else throw new Error("kind");
           } catch { pFailed++; continue; }   // a row that fails the live form's rules is never mailed
           if (r2.sent) pSent++; else pFailed++;
-          if (r2.down) { down = true; pLeft++; }
+          if (r2.down) { down = true; if (r2.requeued) pLeft++; }
         }
       } catch { log("waitlist.drain", 500, "partner_queue_failed"); }
     }

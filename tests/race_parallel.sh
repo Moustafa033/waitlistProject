@@ -87,3 +87,15 @@ $PG -c "delete from private.counters; delete from private.partner_mail_queue; de
 PT=$($PG -c "set role service_role; select public.waitlist_partner_apply('click-race@example.com', $P)->>'token'" | tail -1)
 res=$(race 20 "select public.waitlist_partner_confirm('$PT')->>'ok'")
 check "$(grep -c '^true$' <<<"$res" || true)" 1 "20 simultaneous confirm clicks -> exactly 1 confirmation (one owner notice)"
+
+# 0009 / re-check R3) mixed traffic on ONE inbox at the same moment: partner applies (+tags), waitlist
+# signups (+tags), the waitlist drain and the partner drain. Before 0009's lock order these could deadlock.
+$PG -c "delete from private.counters; delete from private.partner_mail_queue; delete from private.partner_applications; delete from private.send_queue; delete from private.suppressions; update private.settings set value='false' where key='sending_paused'; update private.settings set value='100' where key='mailbox_sends_per_day'; update private.settings set value='0' where key='resend_min_minutes'; update private.settings set value='100' where key='partner_per_day';" >/dev/null
+res=$(race 40 "select case :i % 4
+  when 0 then public.waitlist_partner_apply('mixed+p' || :i || '@example.com', $P)->>'action'
+  when 1 then public.waitlist_signup('mixed+w' || :i || '@example.com', 'waitlist-v1')->>'action'
+  when 2 then (public.waitlist_drain_queue()->>'left')
+  else (public.waitlist_drain_partner_queue()->>'left') end")
+if grep -qi "deadlock\|ERROR" <<<"$res"; then echo "FAIL: mixed partner/waitlist traffic raised an error"; grep -i "error\|deadlock" <<<"$res" | head -3; exit 1; fi
+echo "ok   40 mixed partner/waitlist requests + both drains on one inbox at once -> no deadlock, no error"
+$PG -c "update private.settings set value='30' where key='resend_min_minutes'" >/dev/null
