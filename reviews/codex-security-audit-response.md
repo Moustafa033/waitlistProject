@@ -94,3 +94,13 @@ Changed existing assertions (behaviour changed on purpose, documented): the wait
 Limit of item 1, stated plainly: the check is the last database call before the provider request, but the request itself is a network hop to another company's system. A deletion or pause that commits during those milliseconds cannot stop an email that is already on the wire, and no design can recall an email the provider has accepted. Closing it further would need the provider inside the database transaction, which does not exist.
 
 Changed existing assertion (behaviour changed on purpose): the waitlist signup step order is now `waitlist_unsub_token` -> `waitlist_send_allowed` -> mail (the check moved to be last).
+
+# Response to Codex re-check 4 (reviews/codex-recheck-4.md)
+
+The finding is correct, and it was introduced by the re-check 3 fix: the link was derived from the refundable send counter, so a refunded count plus unsubscribe (or expiry) let a later opt-in re-create the earlier link.
+
+| Item | Fix | Proof |
+|---|---|---|
+| Revoked / expired waitlist link becomes valid again (High) | New columns `confirm_gen` (generation of the current link, only ever incremented) and `confirm_retry` on `private.signups` and `private.partner_applications`. Links are derived from the generation, never from `confirm_sends`. Every live signup / application and every first-time queued send takes generation + 1. A requeue of an email that was not handed over sets `confirm_retry`; the drain then re-sends the SAME generation: same link, same expiry (not extended), same idempotency key (the key now carries the generation). If the link expired meanwhile, the drain makes a new generation. Unsubscribe, replacement and expiry leave the generation where it is, so the old link can never be re-created. The refund is applied once per attempt (`confirm_retry` guard) and only for the current link (`p_token`, now also for `waitlist_partner_requeue`). Existing signups start at generation = their email count, so no idempotency key is reused. | `test_11` re-check 4: refund + unsubscribe + fresh opt-in gives a new link and the revoked one is refused; expired link not revived (waitlist and partner); retry keeps link, number, expiry and generation; 3 requeues refund once; generation not given back. Restoring the old derivation fails the suite on the first of these. |
+
+Changed existing assertions (behaviour changed on purpose): tests that requeued a pending partner application now pass its link; the queue-cap test admits pending rows through `private.partner_enqueue` (confirmed rows bypass the cap since re-check 2); "new details" now expects generation 2.

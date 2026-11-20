@@ -42,7 +42,9 @@ alter table private.partner_applications
   add column confirm_sends        integer not null default 0,
   add column last_confirm_sent_at timestamptz,
   add column confirmed_at         timestamptz,
-  add column details_rev          integer not null default 1;        -- +1 every time the details are replaced
+  add column details_rev          integer not null default 1,        -- +1 every time the details are replaced
+  add column confirm_gen          integer not null default 0,        -- generation of the current link: only ever goes UP
+  add column confirm_retry        boolean not null default false;    -- the current link's email was not handed over; retry it as-is
 update private.partner_applications set confirm_sends = 1000000;   -- legacy: no new link, ever
 delete from private.partner_mail_queue;                             -- legacy queue entries: nothing to send
 alter table private.partner_applications add constraint partner_confirmed_has_time
@@ -53,11 +55,21 @@ create unique index partner_applications_token_idx on private.partner_applicatio
 -- ---------------------------------------------------------------- confirmation links (re-check 3 #3)
 -- A confirmation link is no longer random: it is derived from a secret key (the HMAC key already in
 -- private.app_secrets, with its own prefix so it can never equal an unsubscribe token) and from
--- WHAT it confirms: the row, the revision of its details, and the number of the email it goes out in.
---   * A retry of an email that may or may not have reached the provider is the SAME email: same
---     link, same idempotency key. The provider drops the duplicate and the first link keeps working.
---   * New details (details_rev + 1) or a genuinely new email (send number + 1) give a new link.
+-- WHAT it confirms: the row, the revision of its details, and the link's GENERATION (confirm_gen).
+--   * Every new confirmation takes the next generation. The generation only ever goes up: it is
+--     NOT the refundable send counter (re-check 4: a counter that can move back could re-create a
+--     link that was revoked by unsubscribe, replaced, or expired). A link from an earlier generation
+--     can therefore never become valid again.
+--   * A retry (confirm_retry: the email was not handed to the provider) keeps its generation, so it
+--     is the SAME email: same link, same expiry, same idempotency key. The provider drops a
+--     duplicate and the first link keeps working. Anything else gets a new generation.
 -- Only the hash of the link is stored, as before; the plain link exists only inside the email.
+-- Waitlist rows: existing signups start their generation at their current email count, so a new
+-- idempotency key can never equal one already used for that signup.
+alter table private.signups
+  add column confirm_gen   integer not null default 0,
+  add column confirm_retry boolean not null default false;
+update private.signups set confirm_gen = confirm_sends;
 create or replace function private.confirm_token(p_scope text, p_id uuid, p_rev integer, p_no integer) returns text
 language sql stable security definer set search_path = '' as $$
   select translate(rtrim(encode(extensions.hmac(
@@ -140,7 +152,8 @@ begin
     update private.partner_applications
        set name = p_name, handles = p_handles, pitch = p_pitch, consent_version = p_consent_version,
            details_rev = details_rev + 1,              -- every later link is bound to the new details
-           confirm_token_hash = null, confirm_expires_at = null
+           confirm_token_hash = null, confirm_expires_at = null,
+           confirm_retry = false                       -- new details: nothing of the old email is retried
      where id = v_row.id
      returning * into v_row;
   end if;
@@ -163,18 +176,22 @@ begin
     return jsonb_build_object('action','saved','reason','queued','queued', v_q);
   end if;
 
-  v_token := private.confirm_token('partner', v_row.id, v_row.details_rev, v_row.confirm_sends + 1);
+  -- a new application (or re-application) is always a NEW generation: its link never existed before
+  v_token := private.confirm_token('partner', v_row.id, v_row.details_rev, v_row.confirm_gen + 1);
   update private.partner_applications set
     confirm_token_hash   = private.token_hash(v_token),
     confirm_expires_at   = now() + make_interval(hours => private.cfg_int('partner_confirm_ttl_hours')),
+    confirm_gen          = confirm_gen + 1,
+    confirm_retry        = false,
     confirm_sends        = confirm_sends + 1,
     last_confirm_sent_at = now()
   where id = v_row.id
   returning * into v_row;
   perform private.partner_dequeue_nowait(v_row.id);   -- R4: the live send supersedes it (never waits: re-check 2 #4)
+  -- "send_no" is the GENERATION: it goes into the idempotency key, so a key is never reused for another link
   return jsonb_build_object('action','send','kind','confirm','id',v_row.id,'token',v_token,
                             'tag', encode(substr(private.token_hash(v_token), 1, 8), 'hex'),
-                            'send_no',v_row.confirm_sends,'hour',v_hour);
+                            'send_no',v_row.confirm_gen,'hour',v_hour);
 end $$;
 
 -- ---------------------------------------------------------------- confirm
@@ -271,19 +288,33 @@ begin
         if not private.take('send_day', v_day, private.cfg_int('global_sends_per_day')) then
           perform private.give_back('send_hour', v_hour); perform private.give_back(v_mbx, v_day); exit;
         end if;
-        -- a retry (requeued after "provider not reached") has the same revision and number => the SAME link
-        v_token := private.confirm_token('partner', a.id, a.details_rev, a.confirm_sends + 1);
-        update private.partner_applications set
-          confirm_token_hash   = private.token_hash(v_token),
-          confirm_expires_at   = now() + make_interval(hours => private.cfg_int('partner_confirm_ttl_hours')),
-          confirm_sends        = confirm_sends + 1,
-          last_confirm_sent_at = now()
-        where id = a.id
-        returning * into a;
+        if a.confirm_retry and a.confirm_token_hash is not null and a.confirm_expires_at > now() then
+          -- RETRY of an email that was not handed over: the same generation => the SAME link, the
+          -- SAME expiry (not extended) and the SAME idempotency key
+          v_token := private.confirm_token('partner', a.id, a.details_rev, a.confirm_gen);
+          update private.partner_applications set
+            confirm_retry        = false,
+            confirm_sends        = confirm_sends + 1,
+            last_confirm_sent_at = now()
+          where id = a.id
+          returning * into a;
+        else
+          -- a link that was never sent before (or whose retry expired): a NEW generation
+          v_token := private.confirm_token('partner', a.id, a.details_rev, a.confirm_gen + 1);
+          update private.partner_applications set
+            confirm_token_hash   = private.token_hash(v_token),
+            confirm_expires_at   = now() + make_interval(hours => private.cfg_int('partner_confirm_ttl_hours')),
+            confirm_gen          = confirm_gen + 1,
+            confirm_retry        = false,
+            confirm_sends        = confirm_sends + 1,
+            last_confirm_sent_at = now()
+          where id = a.id
+          returning * into a;
+        end if;
         delete from private.partner_mail_queue where application_id = a.id;
         v_out := v_out || jsonb_build_object('kind', 'confirm', 'id', a.id, 'email', a.email, 'token', v_token,
                                              'tag', encode(substr(private.token_hash(v_token), 1, 8), 'hex'),
-                                             'send_no', a.confirm_sends, 'hour', v_hour);
+                                             'send_no', a.confirm_gen, 'hour', v_hour);
       else
         if not private.take('send_hour', v_hour, private.cfg_int('global_sends_per_hour')) then exit; end if;
         if not private.take('send_day', v_day, private.cfg_int('global_sends_per_day')) then
@@ -329,23 +360,36 @@ $$;
 -- ---------------------------------------------------------------- requeue (re-stated from 0007)
 -- R3: locks the application row BEFORE queue admission (same order as apply/confirm).
 -- R7: a confirmation link that never reached the provider does not count as one of the 3 links.
--- Re-check 2 #3 / 3 #3: the current link is NOT cleared, and giving the attempt back means the
--- retry has the same revision and number, so the drain rebuilds the SAME link and the SAME
--- idempotency key: if the provider did receive the first try, it drops the duplicate.
--- The inbox's daily allowance for that try is given back too (the drain charges it at dispatch).
--- Returns false if refused (queue full).
-create or replace function public.waitlist_partner_requeue(p_id uuid) returns boolean
+-- Re-check 2 #3 / 3 #3 / 4: the current link is NOT cleared. The row is marked confirm_retry, so
+-- the drain re-sends the SAME generation: same link, same expiry, same idempotency key (if the
+-- provider did receive the first try, it drops the duplicate).
+--   * Pending rows: p_token must be the row's CURRENT link (the attempt that failed). A link that
+--     was replaced meanwhile is not retried and nothing is refunded for it.
+--   * The refund (the attempt no longer counts, the inbox's daily unit is returned) is applied
+--     ONCE per attempt: a second requeue of the same attempt changes nothing.
+--   * The generation is never given back.
+-- Returns false if refused (queue full, or not the current attempt).
+drop function if exists public.waitlist_partner_requeue(uuid);
+create or replace function public.waitlist_partner_requeue(p_id uuid, p_token text default null) returns boolean
 language plpgsql security definer set search_path = '' as $$
 declare a private.partner_applications%rowtype;
 begin
   if p_id is null then return false; end if;
   select * into a from private.partner_applications where id = p_id for update;
   if not found then return false; end if;
-  if a.status = 'pending' and a.last_confirm_sent_at is not null and a.confirm_sends > 0 then
-    perform private.give_back(private.mailbox_bucket(a.email), date_trunc('day', a.last_confirm_sent_at));
-    update private.partner_applications
-       set confirm_sends = confirm_sends - 1, last_confirm_sent_at = null
-     where id = p_id;
+  if a.status = 'pending' then
+    if p_token is null or p_token !~ '^[A-Za-z0-9_-]{43}$'
+       or a.confirm_token_hash is distinct from private.token_hash(p_token) then
+      return false;                                 -- not the current attempt: nothing to retry
+    end if;
+    if not a.confirm_retry then
+      if a.last_confirm_sent_at is not null and a.confirm_sends > 0 then
+        perform private.give_back(private.mailbox_bucket(a.email), date_trunc('day', a.last_confirm_sent_at));
+      end if;
+      update private.partner_applications
+         set confirm_retry = true, confirm_sends = greatest(confirm_sends - 1, 0), last_confirm_sent_at = null
+       where id = p_id;
+    end if;
   end if;
   if not private.partner_enqueue(p_id) then
     perform private.raise_alert('queue_full', date_trunc('day', now()));
@@ -360,8 +404,10 @@ end $$;
 --   * No handoff happened, so the address gets its allowance back: the attempt no longer counts
 --     toward max_confirm_sends, the wait between emails is lifted, and the inbox's daily unit is
 --     returned (the drain takes it again when it really sends).
---   * The retry therefore has the same number => waitlist_drain_queue rebuilds the SAME link and
---     the SAME idempotency key, so a duplicate is dropped by the provider.
+--   * The row is marked confirm_retry: waitlist_drain_queue re-sends the SAME generation (same
+--     link, same expiry, same idempotency key), so a duplicate is dropped by the provider.
+--   * Re-check 4: the GENERATION is never given back, so no later signup can re-create this link.
+--     The refund is applied once per attempt (a second requeue of the same attempt changes nothing).
 -- Only a still-pending signup whose current link is the one that failed (p_token) is restored;
 -- anything else is left alone. Returns whether it is in the queue.
 create or replace function public.waitlist_signup_requeue(p_signup_id uuid, p_token text) returns boolean
@@ -374,10 +420,12 @@ begin
   if s.confirm_token_hash is distinct from private.token_hash(p_token) then
     return false;                                   -- a newer email replaced this one: nothing to retry
   end if;
-  if s.last_confirm_sent_at is not null and s.confirm_sends > 0 then
-    perform private.give_back(private.mailbox_bucket(s.email), date_trunc('day', s.last_confirm_sent_at));
+  if not s.confirm_retry then
+    if s.last_confirm_sent_at is not null and s.confirm_sends > 0 then
+      perform private.give_back(private.mailbox_bucket(s.email), date_trunc('day', s.last_confirm_sent_at));
+    end if;
     update private.signups
-       set confirm_sends = confirm_sends - 1, last_confirm_sent_at = null, updated_at = now()
+       set confirm_retry = true, confirm_sends = greatest(confirm_sends - 1, 0), last_confirm_sent_at = null, updated_at = now()
      where id = p_signup_id;
   end if;
   return private.enqueue(p_signup_id);
@@ -416,8 +464,8 @@ returns text language sql stable security definer set search_path = '' as $$
 $$;
 
 -- ---------------------------------------------------------------- waitlist: key-derived links too
--- Re-stated from 0005, UNCHANGED except the one line that makes the link: private.new_token() ->
--- private.confirm_token('waitlist', id, 0, number of this email). A retry of an email that was not
+-- Re-stated from 0005. Changed only where the link is made: private.new_token() ->
+-- private.confirm_token('waitlist', id, 0, generation), plus the retry branch in the drain. A retry of an email that was not
 -- handed over (waitlist_signup_requeue gives the number back) is therefore the SAME link with the
 -- SAME idempotency key (confirm/<signup id>/<number>): the provider drops a duplicate, and a link
 -- that did arrive keeps working. A genuinely new email has the next number and a new link.
@@ -502,13 +550,16 @@ begin
   end if;
 
   v_was_unsub := v_row.status = 'unsubscribed';
-  v_token := private.confirm_token('waitlist', v_row.id, 0, v_row.confirm_sends + 1);
+  -- a live signup is always a NEW generation (never the refundable send counter: re-check 4)
+  v_token := private.confirm_token('waitlist', v_row.id, 0, v_row.confirm_gen + 1);
   update private.signups set
     status               = case when status = 'unsubscribed' then 'pending' else status end,
     consent_version      = p_consent_version,
     locale               = coalesce(p_locale, locale),
     confirm_token_hash   = private.token_hash(v_token),
     confirm_expires_at   = now() + make_interval(hours => private.cfg_int('confirm_ttl_hours')),
+    confirm_gen          = confirm_gen + 1,
+    confirm_retry        = false,
     confirm_sends        = confirm_sends + 1,
     last_confirm_sent_at = now(),
     updated_at           = now()
@@ -522,8 +573,9 @@ begin
   values (v_row.id, case when v_was_unsub then 'resubscribe_requested' else 'requested' end,
           p_consent_version, jsonb_build_object('source', p_source, 'send_no', v_row.confirm_sends));
 
+  -- "send_no" is the GENERATION: it goes into the idempotency key, so a key never serves two links
   return jsonb_build_object('action','send','token', v_token, 'signup_id', v_row.id,
-                            'send_no', v_row.confirm_sends, 'hour', v_hour);
+                            'send_no', v_row.confirm_gen, 'hour', v_hour);
 end $$;
 
 create or replace function public.waitlist_drain_queue() returns jsonb
@@ -577,21 +629,37 @@ begin
         exit;
       end if;
 
-      v_token := private.confirm_token('waitlist', v_row.id, 0, v_row.confirm_sends + 1);
-      update private.signups set
-        confirm_token_hash   = private.token_hash(v_token),
-        confirm_expires_at   = now() + make_interval(hours => private.cfg_int('confirm_ttl_hours')),
-        confirm_sends        = confirm_sends + 1,
-        last_confirm_sent_at = now(),
-        updated_at           = now()
-      where id = v_row.id
-      returning * into v_row;
+      if v_row.confirm_retry and v_row.confirm_token_hash is not null and v_row.confirm_expires_at > now() then
+        -- RETRY of an email that was not handed over (re-check 3/4): the same generation => the SAME
+        -- link, the SAME expiry (not extended) and the SAME idempotency key
+        v_token := private.confirm_token('waitlist', v_row.id, 0, v_row.confirm_gen);
+        update private.signups set
+          confirm_retry        = false,
+          confirm_sends        = confirm_sends + 1,
+          last_confirm_sent_at = now(),
+          updated_at           = now()
+        where id = v_row.id
+        returning * into v_row;
+      else
+        -- a link that was never sent before (or whose retry expired): a NEW generation
+        v_token := private.confirm_token('waitlist', v_row.id, 0, v_row.confirm_gen + 1);
+        update private.signups set
+          confirm_token_hash   = private.token_hash(v_token),
+          confirm_expires_at   = now() + make_interval(hours => private.cfg_int('confirm_ttl_hours')),
+          confirm_gen          = confirm_gen + 1,
+          confirm_retry        = false,
+          confirm_sends        = confirm_sends + 1,
+          last_confirm_sent_at = now(),
+          updated_at           = now()
+        where id = v_row.id
+        returning * into v_row;
+      end if;
       delete from private.send_queue where signup_id = v_row.id;
       insert into private.consent_events(signup_id, event, consent_version, detail)
       values (v_row.id, 'requested', v_row.consent_version,
               jsonb_build_object('source', 'queue', 'send_no', v_row.confirm_sends));
       v_out := v_out || jsonb_build_object('email', v_row.email, 'token', v_token, 'signup_id', v_row.id,
-                                           'send_no', v_row.confirm_sends, 'hour', v_hour);
+                                           'send_no', v_row.confirm_gen, 'hour', v_hour);
       v_n := v_n + 1;
     end loop;
   end if;
@@ -635,7 +703,7 @@ revoke all on function private.partner_dequeue_nowait(uuid) from public, anon, a
 do $$ declare f text; begin
   foreach f in array array[
     'public.waitlist_partner_apply(text,text,jsonb,text,text)', 'public.waitlist_partner_confirm(text)',
-    'public.waitlist_drain_partner_queue()', 'public.waitlist_partner_requeue(uuid)',
+    'public.waitlist_drain_partner_queue()', 'public.waitlist_partner_requeue(uuid,text)',
     'public.waitlist_send_allowed(text,text,uuid,text)', 'public.waitlist_signup_requeue(uuid,text)',
     'public.waitlist_signup(text,text,text,text)', 'public.waitlist_drain_queue()', 'public.waitlist_maintenance()'] loop
     execute format('revoke all on function %s from public, anon, authenticated', f);

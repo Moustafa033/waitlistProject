@@ -60,8 +60,10 @@ select t.ok((select count(*) from private.partner_mail_queue) = 0, 'queue empty'
 create temp table qa as select id from private.partner_applications where email = 'q-a@example.com';
 grant select on qa to service_role;
 set role service_role;
-select t.ok(public.waitlist_partner_requeue((select id from qa)), 'requeue an existing application');
-select t.ok(public.waitlist_partner_requeue((select id from qa)), 'requeue again: still fine');
+select t.ok(public.waitlist_partner_requeue((select id from qa), (select e->>'token' from d1, jsonb_array_elements(j->'sends') e where e->>'email' = 'q-a@example.com')), 'requeue an existing application');
+select t.ok(public.waitlist_partner_requeue((select id from qa), (select e->>'token' from d1, jsonb_array_elements(j->'sends') e where e->>'email' = 'q-a@example.com')), 'requeue again: still fine');
+select t.ok(not public.waitlist_partner_requeue((select id from qa), repeat('Z', 43)), 'a retry that does not name the current link is refused');
+select t.ok(not public.waitlist_partner_requeue((select id from qa)), 'a pending application cannot be requeued without its link');
 select t.ok(not public.waitlist_partner_requeue(gen_random_uuid()), 'a made-up id is refused');
 select t.ok(not public.waitlist_partner_requeue(null), 'null is refused');
 reset role;

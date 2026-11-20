@@ -834,3 +834,17 @@ Deno.test("re-check 3 #2: in the drain every waitlist row that was not handed ov
      [SEND.signup_id, "33333333-3333-4333-8333-333333333333"]);
   eq(calls.filter((c) => c.url.endsWith("/rpc/waitlist_send_failed")).length, 2, "one refund per row");
 });
+
+// ------------------------------------------------------------------ Codex re-check 4
+Deno.test("re-check 4: a partner retry names the exact link that failed (owner notices carry none)", async () => {
+  const down = fakeFetch({ resend: "down" });
+  await makeHandler(depsP(down.f))(req("partner", partnerBody()));
+  await settle();
+  eq(down.calls.filter((c) => c.url.endsWith("/rpc/waitlist_partner_requeue")).map((c) => JSON.parse(c.body!)),
+     [{ p_id: PID, p_token: "P".repeat(43) }], "the database can refuse a retry of a link that is no longer current");
+  const owner = fakeFetch({ resend: "down" });
+  await makeHandler(depsP(owner.f))(pconfirm());
+  await settle();
+  eq(owner.calls.filter((c) => c.url.endsWith("/rpc/waitlist_partner_requeue")).map((c) => JSON.parse(c.body!)),
+     [{ p_id: PID, p_token: null }]);
+});

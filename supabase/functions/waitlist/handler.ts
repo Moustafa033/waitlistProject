@@ -184,8 +184,8 @@ export function makeHandler(d: Deps): (req: Request) => Promise<Response> {
   // Audit #15: a requeue that fails or is refused (queue full) is logged, never silent. The application
   // itself is always in the database, and the owner gets the partner_mail_skipped alert.
   // Returns whether the application is back in the queue (re-check R6: refusals are not counted as waiting).
-  async function requeue(id: string): Promise<boolean> {
-    const ok = await rpc<boolean>(cfg, "waitlist_partner_requeue", { p_id: id }, d.fetchFn).catch(() => false);
+  async function requeue(id: string, token?: string): Promise<boolean> {
+    const ok = await rpc<boolean>(cfg, "waitlist_partner_requeue", { p_id: id, p_token: token ?? null }, d.fetchFn).catch(() => false);
     if (ok !== true) log("waitlist.partner_mail", 500, "requeue_failed");
     return ok === true;
   }
@@ -215,14 +215,14 @@ export function makeHandler(d: Deps): (req: Request) => Promise<Response> {
     if (allowed !== "ok") {
       await refund();
       log("waitlist.partner_mail", 200, `${code}_${allowed}`);
-      return { sent: false, down: false, requeued: allowed === "paused" ? await requeue(id) : false };
+      return { sent: false, down: false, requeued: allowed === "paused" ? await requeue(id, token) : false };
     }
     try { await sendMail(cfg, mail, d.fetchFn); log("waitlist.partner_mail", 200, `${code}_sent`); return { sent: true, down: false, requeued: false }; }
     catch (e) {
       log("waitlist.partner_mail", 500, `${code}_failed`);
       if (!(e instanceof ProviderNotReached)) return { sent: false, down: false, requeued: false };
       await refund();
-      return { sent: false, down: true, requeued: await requeue(id) };
+      return { sent: false, down: true, requeued: await requeue(id, token) };
     }
   }
   const sendPartnerConfirm = (id: string, email: string, token: string, tag: string, sendNo: number, hour: string) =>
@@ -323,7 +323,7 @@ export function makeHandler(d: Deps): (req: Request) => Promise<Response> {
           if (!isUuid(s.id) || typeof s.hour !== "string") { pFailed++; continue; }
           if (down) {   // provider went down mid-run: give the unit back and put the rest back in the queue
             await rpc(cfg, "waitlist_send_failed", { p_hour: s.hour }, d.fetchFn).catch(() => {});
-            if (await requeue(s.id)) pLeft++;
+            if (await requeue(s.id, s.kind === "confirm" && isToken(s.token) ? s.token : undefined)) pLeft++;
             pFailed++; continue;
           }
           let email: string;

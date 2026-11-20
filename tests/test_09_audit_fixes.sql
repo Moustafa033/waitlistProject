@@ -82,9 +82,7 @@ update private.settings set value = '2' where key = 'partner_queue_max';
 delete from private.partner_mail_queue;
 create temp table ids as select id from private.partner_applications limit 4;
 grant select on ids to service_role;
-set role service_role;
-select t.ok((select count(*) filter (where public.waitlist_partner_requeue(id)) from ids) = 2, 'only 2 of 4 requeues admitted (cap 2)');
-reset role;
+select t.ok((select count(*) filter (where private.partner_enqueue(id)) from ids) = 2, 'only 2 of 4 pending admissions fit (cap 2)');
 select t.ok((select count(*) from private.partner_mail_queue) = 2, 'queue holds exactly the cap');
 update private.settings set value = '1000' where key = 'partner_queue_max';
 
