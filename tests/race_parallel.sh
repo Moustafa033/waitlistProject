@@ -113,3 +113,16 @@ if grep -qi "deadlock\|ERROR" <<<"$res"; then echo "FAIL: live sends vs drains o
 echo "ok   20 live re-applications + 20 drains on a populated queue at once -> no deadlock, no error"
 check "$($PG -c "select count(*) from private.partner_applications where email like 'busyq-%' and confirm_sends > 2")" 0 "nobody got more than 2 links from the race"
 $PG -c "update private.settings set value='30' where key='resend_min_minutes'" >/dev/null
+
+# re-check 3 #4) waitlist: live re-signups, requeues and drains for the SAME 20 people at the same moment.
+# Requeue now locks the signup row before the queue insert, like a live signup, so no deadlock.
+$PG -c "delete from private.counters; delete from private.send_queue; delete from private.suppressions; update private.settings set value='0' where key='resend_min_minutes'; update private.settings set value='100' where key='max_confirm_sends'; update private.settings set value='100' where key='mailbox_sends_per_day'; update private.settings set value='500' where key='global_sends_per_hour'; update private.settings set value='false' where key='sending_paused';" >/dev/null
+$PG -c "drop table if exists public.race_lk; create table public.race_lk(n int primary key, id uuid, tok text); grant select on public.race_lk to service_role;" >/dev/null
+for i in $(seq 1 20); do $PG -c "set role service_role; create temp table x as select public.waitlist_signup('lk-$i@example.com','waitlist-v1') j; reset role; insert into public.race_lk select $i, (j->>'signup_id')::uuid, j->>'token' from x;" >/dev/null; done
+res=$(race 60 "select case :i % 3
+  when 0 then public.waitlist_signup('lk-' || (:i / 3) || '@example.com', 'waitlist-v1')->>'action'
+  when 1 then (select public.waitlist_signup_requeue(id, tok)::text from public.race_lk where n = (:i + 2) / 3)
+  else (public.waitlist_drain_queue()->>'left') end")
+if grep -qi "deadlock\|ERROR" <<<"$res"; then echo "FAIL: waitlist signup/requeue/drain raised an error"; grep -i "error\|deadlock" <<<"$res" | head -3; exit 1; fi
+echo "ok   20 live re-signups + 20 requeues + 20 drains for the same people at once -> no deadlock, no error"
+$PG -c "drop table public.race_lk; update private.settings set value='30' where key='resend_min_minutes'; update private.settings set value='3' where key='max_confirm_sends'" >/dev/null

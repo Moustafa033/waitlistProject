@@ -159,7 +159,7 @@ Deno.test("signup happy path: Turnstile checked, RPC called with normalized emai
   assert(!/ahmed@example\.com/.test(m.html + m.text + m.subject), "the recipient's address is never echoed into the email");
   // Turnstile first, then the signup RPC; the signed-link RPC and the mail run in the background.
   const order = calls.map((c) => c.url.includes("cloudflare") ? "ts" : c.url.includes("rpc") ? c.url.split("/").pop() : "mail");
-  eq(order, ["ts", "waitlist_signup", "waitlist_send_allowed", "waitlist_unsub_token", "mail"], "Turnstile must run BEFORE the database; the send-time check right before the email");
+  eq(order, ["ts", "waitlist_signup", "waitlist_unsub_token", "waitlist_send_allowed", "mail"], "Turnstile must run BEFORE the database; the send-time check is the LAST step before the email");
 });
 
 Deno.test("confirmation mail carries reply_to only when configured", async () => {
@@ -777,4 +777,60 @@ Deno.test("re-check 2 #3: a queued link without its fingerprint is never sent (n
   const out = await (await makeHandler(depsP(f, cronP))(drainReq(CRON))).json();
   eq([out.partner_sent, out.partner_failed], [0, 2]);
   eq(mails(calls).length, 0);
+});
+
+// ------------------------------------------------------------------ Codex re-check 3
+Deno.test("re-check 3 #1: the send-time check is the LAST call before the provider and names the exact link", async () => {
+  const w = fakeFetch();
+  await makeHandler(deps(w.f))(req("signup", goodBody()));
+  await settle();
+  const wi = w.calls.findIndex((c) => c.url.startsWith("https://api.resend.com"));
+  assert(w.calls[wi - 1].url.endsWith("/rpc/waitlist_send_allowed"), "waitlist: nothing between the check and the provider");
+  eq(JSON.parse(w.calls[wi - 1].body!), { p_email: "ahmed@example.com", p_kind: "signup", p_id: "11111111-1111-4111-8111-111111111111", p_token: TOKEN });
+  const p = fakeFetch();
+  await makeHandler(depsP(p.f))(req("partner", partnerBody()));
+  await settle();
+  const pi = p.calls.findIndex((c) => c.url.startsWith("https://api.resend.com"));
+  assert(p.calls[pi - 1].url.endsWith("/rpc/waitlist_send_allowed"), "partner: nothing between the check and the provider");
+  eq(JSON.parse(p.calls[pi - 1].body!).p_token, "P".repeat(43), "the partner check names the link in the email");
+  const o = fakeFetch();
+  await makeHandler(depsP(o.f))(pconfirm());
+  await settle();
+  eq(JSON.parse(o.calls.find((c) => c.url.endsWith("/rpc/waitlist_send_allowed"))!.body!).p_kind, "partner_owner");
+});
+
+Deno.test("re-check 3 #2: a LIVE waitlist email that was not handed over is refunded AND requeued (never lost)", async () => {
+  const requeues = (calls: Call[]) => calls.filter((c) => c.url.endsWith("/rpc/waitlist_signup_requeue")).map((c) => JSON.parse(c.body!));
+  const want = [{ p_signup_id: "11111111-1111-4111-8111-111111111111", p_token: TOKEN }];
+  const down = fakeFetch({ resend: "down" });
+  eq((await makeHandler(deps(down.f))(req("signup", goodBody()))).status, 202);
+  await settle();
+  eq(requeues(down.calls), want, "provider not reached -> back in the queue with its own link");
+  eq(down.calls.filter((c) => c.url.endsWith("/rpc/waitlist_send_failed")).length, 1, "send unit refunded once");
+  const paused = fakeFetch({ rpc: { waitlist_send_allowed: "paused" } });
+  await makeHandler(deps(paused.f))(req("signup", goodBody()));
+  await settle();
+  eq(requeues(paused.calls), want, "paused -> kept");
+  const prep = fakeFetch({ rpc: { waitlist_unsub_token: "bad" } });
+  await makeHandler(deps(prep.f))(req("signup", goodBody()));
+  await settle();
+  eq(requeues(prep.calls), want, "could not prepare the email -> kept");
+  eq(prep.calls.filter((c) => c.url.startsWith("https://api.resend.com")).length, 0);
+  const gone = fakeFetch({ rpc: { waitlist_send_allowed: "cancelled" } });
+  await makeHandler(deps(gone.f))(req("signup", goodBody()));
+  await settle();
+  eq(requeues(gone.calls), [], "cancelled (deleted / unsubscribed / replaced) -> NOT requeued");
+  const err = fakeFetch({ resend: 500 });
+  await makeHandler(deps(err.f))(req("signup", goodBody()));
+  await settle();
+  eq(requeues(err.calls), [], "the provider answered: it may have sent, so no second email");
+});
+
+Deno.test("re-check 3 #2: in the drain every waitlist row that was not handed over is requeued exactly once", async () => {
+  const rows = [SEND, { ...SEND, signup_id: "33333333-3333-4333-8333-333333333333", email: "q2@example.com" }];
+  const { f, calls } = fakeFetch({ resend: "down", rpc: { waitlist_drain_queue: { sends: rows, left: 0, paused: false }, waitlist_take_alerts: [] } });
+  await makeHandler(depsP(f, cronP))(drainReq(CRON));
+  eq(calls.filter((c) => c.url.endsWith("/rpc/waitlist_signup_requeue")).map((c) => JSON.parse(c.body!).p_signup_id),
+     [SEND.signup_id, "33333333-3333-4333-8333-333333333333"]);
+  eq(calls.filter((c) => c.url.endsWith("/rpc/waitlist_send_failed")).length, 2, "one refund per row");
 });

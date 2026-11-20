@@ -71,34 +71,48 @@ export function makeHandler(d: Deps): (req: Request) => Promise<Response> {
     return accepted(r.action === "send" ? "sent" : (r.reason ?? "none"));
   }
 
-  /** The ONE path for a waitlist confirmation email, live or queued (re-check 2 #1). Right before the
-   *  handoff it asks the database whether this signup may still be emailed. Returns "sent", "down"
-   *  (provider not reached: unit refunded), "held" (paused / temporary error: unit refunded and the
-   *  signup put back in the queue) or "cancelled" (deleted, unsubscribed, bounced: unit refunded). */
+  /** The ONE path for a waitlist confirmation email, live or queued. Order (re-check 3 #1):
+   *    1. prepare everything the email needs (the unsubscribe link);
+   *    2. LAST step before the provider: ask the database whether THIS exact link may still be sent
+   *       (address not on the do-not-email list, sending not paused, signup still pending, and the
+   *       link in this email is still the signup's current, unexpired link);
+   *    3. hand it to the provider.
+   *  Whenever the email was NOT handed over (prepare failed, paused, provider not reached) the send
+   *  unit is refunded and the signup goes back in the queue with its allowance restored (re-check 3
+   *  #2), so the retry is the same email: same link, same idempotency key.
+   *  Returns "sent", "down" (provider not reached), "held" (kept for later), "cancelled" (deleted,
+   *  unsubscribed, bounced, replaced by a newer email) or "failed" (the provider answered with an error). */
   async function sendSignupConfirmation(email: string, token: string, signupId: string, sendNo: number, hour: string):
       Promise<"sent" | "down" | "held" | "cancelled" | "failed"> {
     const refund = () => rpc(cfg, "waitlist_send_failed", { p_hour: hour }, d.fetchFn).catch(() => {});
-    const allowed = await sendAllowed(email, "signup", signupId);
-    if (allowed !== "ok") {
+    const keep = async () => {
       await refund();
-      if (allowed === "paused") await rpc(cfg, "waitlist_signup_requeue", { p_signup_id: signupId }, d.fetchFn).catch(() => {});
-      log("waitlist.mail", 200, allowed === "paused" ? "held" : "cancelled");
+      const ok = await rpc<boolean>(cfg, "waitlist_signup_requeue", { p_signup_id: signupId, p_token: token }, d.fetchFn).catch(() => false);
+      if (ok !== true) log("waitlist.mail", 500, "requeue_failed");
+    };
+    let mail: Mail;
+    try {
+      const unsubToken = await rpc<string>(cfg, "waitlist_unsub_token", { p_signup_id: signupId }, d.fetchFn);
+      if (!isToken(unsubToken)) throw new Error("unsub token");
+      mail = confirmationMail(cfg, email, token, signupId, sendNo, unsubToken);
+    } catch {
+      await keep();
+      log("waitlist.mail", 500, "prepare_failed");
+      return "held";
+    }
+    const allowed = await sendAllowed(email, "signup", signupId, token);
+    if (allowed !== "ok") {
+      if (allowed === "paused") await keep(); else await refund();
+      log("waitlist.mail", 200, allowed === "paused" ? "held" : allowed);
       return allowed === "paused" ? "held" : "cancelled";
     }
     try {
-      let unsubToken: string;
-      try {
-        unsubToken = await rpc<string>(cfg, "waitlist_unsub_token", { p_signup_id: signupId }, d.fetchFn);
-        if (!isToken(unsubToken)) throw new Error("unsub token");
-      } catch {
-        throw new ProviderNotReached();   // never sent => give the global units back
-      }
-      await sendMail(cfg, confirmationMail(cfg, email, token, signupId, sendNo, unsubToken), d.fetchFn);
+      await sendMail(cfg, mail, d.fetchFn);
       log("waitlist.mail", 200, "sent");
       return "sent";
     } catch (e) {
       log("waitlist.mail", 500, "mail_failed");
-      if (e instanceof ProviderNotReached) { await refund(); return "down"; }
+      if (e instanceof ProviderNotReached) { await keep(); return "down"; }
       return "failed";
     }
   }
@@ -179,26 +193,31 @@ export function makeHandler(d: Deps): (req: Request) => Promise<Response> {
   // Asked right before EVERY email is handed to the provider, live or queued (re-check 2 #1): the
   // do-not-email list, the kill switch AND the current state of the signup / application the email is
   // about. Anything unexpected (error, odd answer) counts as "paused": the work is kept, nothing is sent.
-  async function sendAllowed(email: string, kind: "signup" | "partner_confirm" | "partner_owner", id: string):
+  // `token` = the link inside the email (confirmation emails): the database checks it is still the
+  // row's CURRENT link, so an email whose link was replaced or used is never sent (re-check 3 #1).
+  async function sendAllowed(email: string, kind: "signup" | "partner_confirm" | "partner_owner", id: string, token?: string):
       Promise<"ok" | "paused" | "suppressed" | "cancelled"> {
-    const v = await rpc<string>(cfg, "waitlist_send_allowed", { p_email: email, p_kind: kind, p_id: id }, d.fetchFn).catch(() => "paused");
+    const v = await rpc<string>(cfg, "waitlist_send_allowed", { p_email: email, p_kind: kind, p_id: id, p_token: token ?? null }, d.fetchFn)
+      .catch(() => "paused");
     return v === "ok" || v === "suppressed" || v === "cancelled" ? v : "paused";
   }
 
   type PResult = { sent: boolean; down: boolean; requeued: boolean };
   /** The ONE path for a partner email, live or queued. The database already took its send unit.
-   *  Not allowed any more -> unit refunded (paused: back in the queue). Provider not reached -> unit
-   *  refunded and back in the queue; the next job run retries it (the row's status decides what). */
+   *  Same order as the waitlist path: the email is built first, the send-time check is the LAST step
+   *  before the provider. Not allowed any more -> unit refunded (paused: back in the queue). Provider
+   *  not reached -> unit refunded and back in the queue; the retry is the same email (same link, same
+   *  idempotency key), so the provider drops a duplicate. */
   async function partnerSend(id: string, hour: string, email: string, kind: "partner_confirm" | "partner_owner",
-      m: () => Mail, code: string): Promise<PResult> {
+      mail: Mail, code: string, token?: string): Promise<PResult> {
     const refund = () => rpc(cfg, "waitlist_send_failed", { p_hour: hour }, d.fetchFn).catch(() => {});
-    const allowed = await sendAllowed(email, kind, id);
+    const allowed = await sendAllowed(email, kind, id, token);
     if (allowed !== "ok") {
       await refund();
       log("waitlist.partner_mail", 200, `${code}_${allowed}`);
       return { sent: false, down: false, requeued: allowed === "paused" ? await requeue(id) : false };
     }
-    try { await sendMail(cfg, m(), d.fetchFn); log("waitlist.partner_mail", 200, `${code}_sent`); return { sent: true, down: false, requeued: false }; }
+    try { await sendMail(cfg, mail, d.fetchFn); log("waitlist.partner_mail", 200, `${code}_sent`); return { sent: true, down: false, requeued: false }; }
     catch (e) {
       log("waitlist.partner_mail", 500, `${code}_failed`);
       if (!(e instanceof ProviderNotReached)) return { sent: false, down: false, requeued: false };
@@ -207,14 +226,14 @@ export function makeHandler(d: Deps): (req: Request) => Promise<Response> {
     }
   }
   const sendPartnerConfirm = (id: string, email: string, token: string, tag: string, sendNo: number, hour: string) =>
-    partnerSend(id, hour, email, "partner_confirm", () => partnerConfirmMail(cfg, email, token, id, sendNo, tag), "confirm");
+    partnerSend(id, hour, email, "partner_confirm", partnerConfirmMail(cfg, email, token, id, sendNo, tag), "confirm", token);
   async function sendPartnerOwner(id: string, hour: string, app: PartnerApp): Promise<PResult> {
     if (!cfg.alertTo) {   // no owner inbox configured: the confirmed application is in the database
       await rpc(cfg, "waitlist_send_failed", { p_hour: hour }, d.fetchFn).catch(() => {});
       return { sent: false, down: false, requeued: false };
     }
     const to = cfg.alertTo;
-    return await partnerSend(id, hour, app.email, "partner_owner", () => partnerOwnerMail(to, id, app), "owner");
+    return await partnerSend(id, hour, app.email, "partner_owner", partnerOwnerMail(to, id, app), "owner");
   }
   const isTag = (v: unknown): v is string => typeof v === "string" && /^[0-9a-f]{16}$/.test(v);
 
@@ -280,16 +299,13 @@ export function makeHandler(d: Deps): (req: Request) => Promise<Response> {
       if (providerDown) {   // after one "provider not reached", do not wait on the rest: give back + requeue
         failed++;
         await rpc(cfg, "waitlist_send_failed", { p_hour: s.hour }, d.fetchFn).catch(() => {});
-        await rpc(cfg, "waitlist_signup_requeue", { p_signup_id: s.signup_id }, d.fetchFn).catch(() => {});
+        await rpc(cfg, "waitlist_signup_requeue", { p_signup_id: s.signup_id, p_token: s.token }, d.fetchFn).catch(() => {});
         continue;
       }
       // the same path as a live signup: send-time check, then the provider (re-check 2 #1)
       const res = await sendSignupConfirmation(email, s.token, s.signup_id, s.send_no, s.hour);
       if (res === "sent") sent++; else failed++;
-      if (res === "down") {
-        providerDown = true;
-        await rpc(cfg, "waitlist_signup_requeue", { p_signup_id: s.signup_id }, d.fetchFn).catch(() => {});
-      }
+      if (res === "down") providerDown = true;   // the shared path already refunded and requeued it
     }
 
     // 0007/0009: then the partner queue (waitlist confirmations keep priority). Each row is ONE email:

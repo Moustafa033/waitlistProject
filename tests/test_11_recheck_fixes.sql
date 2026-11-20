@@ -126,56 +126,138 @@ select t.ok((public.waitlist_partner_confirm((select j->>'token' from r7r))->>'o
   'the current link is NOT killed by a retry');
 reset role;
 
-\echo '--- re-check 2 #1: the send-time check looks at the address, the kill switch AND the current state'
+\echo '--- re-check 2 #1 + 3 #1: the send-time check: address, kill switch, current state AND the exact link'
 insert into private.suppressions(email_hash, reason) values (private.email_hash('gone2@example.com'), 'erasure');
 set role service_role;
 create temp table sa as select t.apply('state@example.com') j;
+create temp table sw as select public.waitlist_signup('wl-state@example.com', 'waitlist-v1') j;
 reset role;
-grant select on sa to service_role;
-create temp table sw as select id from private.signups limit 0;
-insert into sw select id from private.signups where false;
+grant select on sa, sw to service_role;
 set role service_role;
-select public.waitlist_signup('wl-state@example.com', 'waitlist-v1');
+select t.ok(public.waitlist_send_allowed('state@example.com', 'partner_confirm', (select (j->>'id')::uuid from sa), (select j->>'token' from sa)) = 'ok',
+  'pending application + its current link -> ok');
+select t.ok(public.waitlist_send_allowed('state@example.com', 'partner_confirm', (select (j->>'id')::uuid from sa), repeat('A', 43)) = 'cancelled',
+  'another link for the same application -> cancelled');
+select t.ok(public.waitlist_send_allowed('state@example.com', 'partner_confirm', (select (j->>'id')::uuid from sa)) = 'cancelled',
+  'no link given -> cancelled (fails closed)');
+select t.ok(public.waitlist_send_allowed('state@example.com', 'partner_owner', (select (j->>'id')::uuid from sa)) = 'cancelled', 'not confirmed -> no owner notice');
+select t.ok(public.waitlist_send_allowed('other@example.com', 'partner_confirm', (select (j->>'id')::uuid from sa), (select j->>'token' from sa)) = 'cancelled',
+  'address does not match the application -> cancelled');
+select t.ok(public.waitlist_send_allowed('state@example.com', 'partner_confirm', gen_random_uuid(), (select j->>'token' from sa)) = 'cancelled', 'unknown application -> cancelled');
+select t.ok(public.waitlist_send_allowed('wl-state@example.com', 'signup', (select (j->>'signup_id')::uuid from sw), (select j->>'token' from sw)) = 'ok',
+  'pending signup + its current link -> ok');
+select t.ok(public.waitlist_send_allowed('wl-state@example.com', 'signup', (select (j->>'signup_id')::uuid from sw), repeat('B', 43)) = 'cancelled',
+  'wrong link for the signup -> cancelled');
+select t.ok(public.waitlist_send_allowed('gone2@example.com', 'signup', gen_random_uuid(), repeat('A', 43)) = 'suppressed', 'deleted address -> suppressed');
+select t.ok(public.waitlist_send_allowed('state@example.com', 'something', (select (j->>'id')::uuid from sa), (select j->>'token' from sa)) = 'cancelled', 'unknown kind -> cancelled');
+-- the person signs up again: a newer email replaces the first one, which must not be sent any more
+create temp table sw2 as select public.waitlist_signup('wl-state@example.com', 'waitlist-v1') j;
 reset role;
-insert into sw select id from private.signups where email = 'wl-state@example.com';
-grant select on sw to service_role;
+grant select on sw2 to service_role;
+select t.ok((select j->>'token' from sw2) <> (select j->>'token' from sw), 'a new email has a new link');
 set role service_role;
-select t.ok(public.waitlist_send_allowed('state@example.com', 'partner_confirm', (select (j->>'id')::uuid from sa)) = 'ok', 'pending application -> link ok');
-select t.ok(public.waitlist_send_allowed('state@example.com', 'partner_owner',   (select (j->>'id')::uuid from sa)) = 'cancelled', 'not confirmed -> no owner notice');
-select t.ok(public.waitlist_send_allowed('other@example.com', 'partner_confirm', (select (j->>'id')::uuid from sa)) = 'cancelled', 'address does not match the application -> cancelled');
-select t.ok(public.waitlist_send_allowed('state@example.com', 'partner_confirm', gen_random_uuid()) = 'cancelled', 'unknown application -> cancelled');
-select t.ok(public.waitlist_send_allowed('wl-state@example.com', 'signup', (select id from sw)) = 'ok', 'pending signup -> ok');
-select t.ok(public.waitlist_send_allowed('gone2@example.com', 'signup', gen_random_uuid()) = 'suppressed', 'deleted address -> suppressed');
-select t.ok(public.waitlist_send_allowed('state@example.com', 'something', (select (j->>'id')::uuid from sa)) = 'cancelled', 'unknown kind -> cancelled');
+select t.ok(public.waitlist_send_allowed('wl-state@example.com', 'signup', (select (j->>'signup_id')::uuid from sw), (select j->>'token' from sw)) = 'cancelled',
+  'the OLDER email (replaced link) -> cancelled, even though the signup is still pending');
+select t.ok(public.waitlist_send_allowed('wl-state@example.com', 'signup', (select (j->>'signup_id')::uuid from sw), (select j->>'token' from sw2)) = 'ok',
+  'the newest email -> ok');
 reset role;
-update private.signups set status = 'unsubscribed', unsubscribed_at = now() where email = 'wl-state@example.com';
+update private.signups set confirm_expires_at = now() - interval '1 minute' where email = 'wl-state@example.com';
 set role service_role;
-select t.ok(public.waitlist_send_allowed('wl-state@example.com', 'signup', (select id from sw)) = 'cancelled',
-  'unsubscribed meanwhile -> cancelled (not just suppressed addresses)');
+select t.ok(public.waitlist_send_allowed('wl-state@example.com', 'signup', (select (j->>'signup_id')::uuid from sw), (select j->>'token' from sw2)) = 'cancelled',
+  'an expired link is not sent');
+reset role;
+update private.signups set confirm_expires_at = now() + interval '1 hour', status = 'unsubscribed', unsubscribed_at = now() where email = 'wl-state@example.com';
+set role service_role;
+select t.ok(public.waitlist_send_allowed('wl-state@example.com', 'signup', (select (j->>'signup_id')::uuid from sw), (select j->>'token' from sw2)) = 'cancelled',
+  'unsubscribed meanwhile -> cancelled');
 reset role;
 update private.settings set value = 'true' where key = 'sending_paused';
 set role service_role;
-select t.ok(public.waitlist_send_allowed('state@example.com', 'partner_confirm', (select (j->>'id')::uuid from sa)) = 'paused', 'kill switch on -> paused');
+select t.ok(public.waitlist_send_allowed('state@example.com', 'partner_confirm', (select (j->>'id')::uuid from sa), (select j->>'token' from sa)) = 'paused', 'kill switch on -> paused');
 reset role;
 update private.settings set value = 'false' where key = 'sending_paused';
 set role anon;
-select t.fails($$select public.waitlist_send_allowed('a@example.com', 'signup', gen_random_uuid())$$, '42501', 'anon cannot use the check');
+select t.fails($$select public.waitlist_send_allowed('a@example.com', 'signup', gen_random_uuid(), repeat('A', 43))$$, '42501', 'anon cannot use the check');
+select t.fails($$select public.waitlist_signup_requeue(gen_random_uuid(), repeat('A', 43))$$, '42501', 'anon cannot requeue');
+reset role;
+set role service_role;
+select t.fails($$select private.confirm_token('waitlist', gen_random_uuid(), 0, 1)$$, '42501', 'even the server key cannot make a link directly');
 reset role;
 
-\echo '--- re-check 2 #2: a paused waitlist email goes back in its queue; an owner notice is admitted even when the queue is full'
-delete from private.send_queue;
+\echo '--- re-check 3 #2 + #4: a waitlist email that was not handed over is kept, with its allowance, as the SAME email'
+delete from private.send_queue; delete from private.counters;
 set role service_role;
-select t.ok(public.waitlist_signup_requeue((select id from sw)) = false, 'an unsubscribed signup is not requeued');
+create temp table rq as select public.waitlist_signup('wl-rq@example.com', 'waitlist-v1') j;
 reset role;
-update private.signups set status = 'pending', unsubscribed_at = null where email = 'wl-state@example.com';
+grant select on rq to service_role;
+select t.ok((select j->>'token' from rq) <> public.waitlist_unsub_token((select (j->>'signup_id')::uuid from rq)),
+  'a confirmation link can never equal the unsubscribe token (own key prefix)');
+select t.ok((select used from private.counters where bucket = private.mailbox_bucket('wl-rq@example.com')) = 1, 'the inbox was charged 1 email');
 set role service_role;
-select t.ok(public.waitlist_signup_requeue((select id from sw)), 'a pending signup is requeued');
+select t.ok(not public.waitlist_signup_requeue((select (j->>'signup_id')::uuid from rq), repeat('C', 43)), 'requeue with a link that is not the current one -> refused');
+select t.ok(public.waitlist_signup_requeue((select (j->>'signup_id')::uuid from rq), (select j->>'token' from rq)), 'provider not reached -> requeued');
 reset role;
-select t.ok((select count(*) from private.send_queue) = 1, 'it is back in the waitlist queue');
+select t.ok((select confirm_sends = 0 and last_confirm_sent_at is null from private.signups where email = 'wl-rq@example.com'),
+  'the attempt does not count, and the wait between emails is lifted');
+select t.ok((select used from private.counters where bucket = private.mailbox_bucket('wl-rq@example.com')) = 0, 'the inbox got its unit back');
+select t.ok((select confirm_token_hash from private.signups where email = 'wl-rq@example.com') = private.token_hash((select j->>'token' from rq)),
+  'the link is NOT cleared: if that email did arrive, it still works');
+select t.ok(exists (select 1 from private.send_queue q join private.signups s on s.id = q.signup_id where s.email = 'wl-rq@example.com'), 'it is in the queue');
+set role service_role;
+create temp table rqd as select public.waitlist_drain_queue() j;
+reset role;
+select t.ok((select e->>'token' from rqd, jsonb_array_elements(j->'sends') e where e->>'email' = 'wl-rq@example.com') = (select j->>'token' from rq),
+  'the retry is the SAME link');
+select t.ok((select (e->>'send_no')::int from rqd, jsonb_array_elements(j->'sends') e where e->>'email' = 'wl-rq@example.com') = 1,
+  'with the SAME number (same idempotency key: the provider drops a duplicate)');
+-- three failed handoffs in a row do not use up the address's 3 emails
+set role service_role;
+select public.waitlist_signup_requeue((select (j->>'signup_id')::uuid from rq), (select j->>'token' from rq));
+select public.waitlist_drain_queue();
+select public.waitlist_signup_requeue((select (j->>'signup_id')::uuid from rq), (select j->>'token' from rq));
+select public.waitlist_drain_queue();
+reset role;
+select t.ok((select confirm_sends from private.signups where email = 'wl-rq@example.com') = 1, 'after 3 tries of one email the address has used 1 of its emails');
+set role service_role;
+select t.ok((public.waitlist_confirm((select j->>'token' from rq))->>'ok')::boolean, 'and the link confirms');
+select t.ok(not public.waitlist_signup_requeue((select (j->>'signup_id')::uuid from rq), (select j->>'token' from rq)), 'a confirmed signup is never requeued');
+reset role;
+
+\echo '--- re-check 3 #3: a partner retry is the SAME email; replaced details still get a different link'
+delete from private.partner_mail_queue;
+set role service_role;
+create temp table prq as select t.apply('p-rq@example.com', 'First Details') j;
+select t.ok(public.waitlist_partner_requeue((select (j->>'id')::uuid from prq)), 'provider not reached -> requeued');
+reset role;
+grant select on prq to service_role;
+select t.ok((select used from private.counters where bucket = private.mailbox_bucket('p-rq@example.com')) = 0, 'the inbox got its unit back');
+set role service_role;
+create temp table prqd as select public.waitlist_drain_partner_queue() j;
+reset role;
+select t.ok((select e->>'token' from prqd, jsonb_array_elements(j->'sends') e where e->>'email' = 'p-rq@example.com') = (select j->>'token' from prq),
+  'the retry is the SAME link');
+select t.ok((select e->>'tag' from prqd, jsonb_array_elements(j->'sends') e where e->>'email' = 'p-rq@example.com') = (select j->>'tag' from prq)
+            and (select (e->>'send_no')::int from prqd, jsonb_array_elements(j->'sends') e where e->>'email' = 'p-rq@example.com') = 1,
+  'with the SAME idempotency key (number + fingerprint)');
+-- R1 must still hold: after a failed handoff the number is given back, and new details arrive
+set role service_role;
+select public.waitlist_partner_requeue((select (j->>'id')::uuid from prq));
+create temp table prq2 as select t.apply('p-rq@example.com', 'Replaced Details') j;
+reset role;
+grant select on prq2 to service_role;
+select t.ok((select (j->>'send_no')::int from prq2) = 1 and (select j->>'token' from prq2) <> (select j->>'token' from prq),
+  'same number, but NEW details => a different link');
+set role service_role;
+select t.ok(not (public.waitlist_partner_confirm((select j->>'token' from prq))->>'ok')::boolean, 'the first link cannot approve the replaced details');
+select t.ok((public.waitlist_partner_confirm((select j->>'token' from prq2))->>'name') = 'Replaced Details', 'the new link approves exactly its own details');
+reset role;
+
+\echo '--- re-check 2 #2: an owner notice is admitted even when the queue is full'
+create temp table own as select id from private.partner_applications where email = 'p-rq@example.com';
+grant select on own to service_role;
 update private.settings set value = '0' where key = 'partner_queue_max';
-update private.partner_applications set status = 'confirmed', confirmed_at = now() where email = 'state@example.com';
 set role service_role;
-select t.ok(public.waitlist_partner_requeue((select (j->>'id')::uuid from sa)), 'queue "full" -> the owner notice of a CONFIRMED application is still admitted');
+select t.ok(public.waitlist_partner_requeue((select id from own)), 'queue "full" -> the owner notice of a CONFIRMED application is still admitted');
 reset role;
 update private.settings set value = '1000' where key = 'partner_queue_max';
 
