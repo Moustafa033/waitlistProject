@@ -554,3 +554,12 @@ mark.hl { padding: 0; background: none; color: var(--sg-txt, var(--fg)); font-we
 .sg-confirm-card .sg-lead { font-size: 17px; }
 .sg-confirm-card .ts { justify-content: center; margin: 0; }
 .sg-confirm-card .status { margin: 0; color: var(--sg-txt); }
+
+/* "Back to Creating in Public" above the Saigenai header (partners + partners-confirm): visible on every screen size */
+.sg-back { display: inline-flex; align-items: center; gap: 8px; margin-top: 18px; font-size: 13px; font-weight: 600; color: var(--sg-mut); }
+.sg .sg-back { color: var(--sg-mut); }
+.sg .sg-back:hover { color: var(--sg-gold); }
+.sg-back::before { content: "\2190"; transition: transform .2s; }
+.sg-back:hover::before { transform: translateX(-3px); }
+.sg-back:focus-visible { outline: 2px solid var(--sg-gold); outline-offset: 3px; border-radius: 6px; }
+.sg-back + .sg-head { padding-top: 14px; }
